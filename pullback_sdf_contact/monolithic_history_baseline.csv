@@ -1,0 +1,5 @@
+attempt_state_index,accepted_state_index,accepted,step,load_value,target_load,attempt_load,accepted_load_before_step,load_increment,converged,newton_iterations,residual_norm,increment_norm,active_contact_points,negative_gap_sum,max_penetration,reaction_norm,cutback_level,cutback_triggered,cutback_reason,terminated_early,termination_reason,requested_final_target_load,final_accepted_load,reached_final_target,output_index
+1,1,True,1,0.0,0.0,0.0,0.0,0.0,True,0,7.195078743911236e-16,0.0,8,3.596741472147831e-18,2.85271299021229e-17,1.2697478269468207e-18,0,False,,False,completed_schedule,0.06,0.06,True,0
+2,2,True,2,0.02,0.02,0.02,0.0,0.02,True,3,3.739088821301188e-09,0.0,36,0.020003797546783122,0.02000386861705042,0.00523478547457917,0,False,,False,completed_schedule,0.06,0.06,True,1
+3,3,True,3,0.04,0.04,0.04,0.02,0.02,True,3,2.932550824841036e-09,0.0,36,0.04001428688785184,0.04001458913839495,0.009874946043773073,0,False,,False,completed_schedule,0.06,0.06,True,2
+4,4,True,4,0.06,0.06,0.06,0.04,0.019999999999999997,True,3,2.350047408811654e-09,0.0,36,0.06003010844527504,0.06003082899505898,0.014005056882432254,0,False,,False,completed_schedule,0.06,0.06,True,3
