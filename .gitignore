@@ -28,3 +28,9 @@ Thumbs.db
 .env
 .venv/
 venv/
+
+# Latex
+*.aux
+*.log
+*.out
+*.toc

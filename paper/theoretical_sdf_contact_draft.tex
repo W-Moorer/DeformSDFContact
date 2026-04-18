@@ -1,0 +1,1011 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,bm,mathtools}
+\usepackage{booktabs,multirow,array}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{setspace}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{color}
+\usepackage{float}
+
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setstretch{1.2}
+\numberwithin{equation}{section}
+
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\cT}{\mathcal{T}}
+\newcommand{\cJ}{\mathcal{J}}
+\newcommand{\cR}{\mathcal{R}}
+\newcommand{\cG}{\mathcal{G}}
+\newcommand{\bA}{\bm{A}}
+\newcommand{\bC}{\bm{C}}
+\newcommand{\bF}{\bm{F}}
+\newcommand{\bI}{\bm{I}}
+\newcommand{\bn}{\bm{n}}
+\newcommand{\bp}{\bm{p}}
+\newcommand{\bg}{\bm{g}}
+\newcommand{\bE}{\bm{E}}
+\newcommand{\bH}{\bm{H}}
+\newcommand{\bK}{\bm{K}}
+\newcommand{\bR}{\bm{R}}
+\newcommand{\bN}{\bm{N}}
+\newcommand{\bB}{\bm{B}}
+\newcommand{\bd}{\bm{d}}
+\newcommand{\ba}{\bm{a}}
+\newcommand{\bq}{\bm{q}}
+\newcommand{\bx}{\bm{x}}
+\newcommand{\bX}{\bm{X}}
+\newcommand{\bu}{\bm{u}}
+\newcommand{\bphi}{\bm{\phi}}
+\newcommand{\gradX}{\nabla_{\!X}}
+\newcommand{\gradx}{\nabla_{\!x}}
+\newcommand{\sign}{\mathrm{sign}}
+\newcommand{\dist}{\mathrm{dist}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\jump}[1]{\left\llbracket #1 \right\rrbracket}
+\newcommand{\avg}[1]{\left\{ #1 \right\}}
+\newcommand{\Mac}[1]{\left\langle #1 \right\rangle}
+
+\title{有限形变下时变符号距离场的输运--再定距统一理论\\及其与结构接触问题的整体一致线性化}
+\author{论文草稿（中文详细版）}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+针对有限形变下柔性体接触分析中时变符号距离场（Signed Distance Field, SDF）构造缺乏统一理论基础的问题，本文从连续体运动学与几何距离定义出发，建立了一套基于``界面输运 + 距离再定距''的时变 SDF 理论框架。首先，将当前构形中的真实 SDF 定义为变形后接触界面的欧氏符号距离，并通过 pull-back 操作将其转化为参考构形中的辅助场；进一步证明，该 pull-back 距离场满足由右 Cauchy--Green 张量诱导的各向异性 Eikonal 方程。随后，构造了适用于参考窄带区域的变分最小二乘泛函，给出 pull-back 距离场的有限元离散形式，并系统推导了其关于结构位移与距离场自由度的整体一致线性化。基于所得到的块矩阵切线算子，进一步建立了结构场与距离场的 monolithic Newton 闭合系统，同时推导了罚函数法与增广拉格朗日法下接触残量对位移与距离场的严格几何切线。该理论将结构位移、形变诱导度量、距离场重构以及接触力学耦合于统一框架内，为高保真柔性接触分析提供了一套更为严整的几何与数值基础。
+\end{abstract}
+
+\noindent\textbf{关键词：} 符号距离场；有限形变；各向异性 Eikonal 方程；整体一致线性化；接触有限元；增广拉格朗日法
+
+\tableofcontents
+\newpage
+
+\section{引言}
+
+在柔性体接触分析中，接触检测、法向计算、法向间隙评估以及后续接触力学求解都高度依赖于界面几何的稳定表达。对于刚体问题，由于几何边界在运动过程中保持不变，符号距离场（Signed Distance Field, SDF）能够以较低代价提供统一的内外判定、法向与穿透深度计算，因此已成为碰撞检测、机器人规划和接触计算中的重要几何工具。然而，当结构发生有限位移、有限转动甚至大变形时，接触界面本身随构形持续演化，原有静态 SDF 不能直接保持当前构形下的几何正确性，进而导致法向漂移、距离失真与接触响应不一致等问题。
+
+围绕时变 SDF 的构造，现有工程实践中常采用若干低成本更新策略，例如基于参考场的一阶线性修正、近似逆映射回查等。这类方法在一定程度上能够避免每一步从当前几何重建 SDF 的高昂开销，因此在快速原型或中等精度仿真中具有现实意义。然而，从理论上看，这些方法往往将 SDF 视为某种可以直接代数更新的标量场，而未严格区分``界面位置的输运''与``距离性质的保持''这两个本质不同的问题。尤其在有限形变情形下，即使某个更新场的零等值面与当前界面相符，也并不意味着它仍然是当前欧氏空间中的真实距离函数。
+
+本文的基本观点是：\textbf{时变 SDF 不应被简单理解为参考 SDF 的代数修正，而应由界面输运与距离再定距共同定义。} 更具体地说，设参考构形中的接触界面经由连续体形变映射输运至当前构形，则当前真实 SDF 应定义为当前界面在当前欧氏空间中的符号距离；进一步通过 pull-back 操作可将这一问题转化为参考构形中的各向异性距离场问题，其控制方程不再是标准 Eikonal 方程，而是由右 Cauchy--Green 张量诱导的各向异性 Eikonal 方程。由此，原本的时变几何更新问题被改写为固定参考域上的度量距离重构问题，从而为建立理论完整、数值可实现的时变 SDF 框架提供了新的路径。
+
+在此基础上，本文进一步考虑该 pull-back 距离场与结构位移场的双向耦合：结构位移决定形变诱导度量，从而影响距离场；而距离场则通过接触间隙、法向与接触残量反馈至结构平衡方程。由此形成一个以结构位移自由度与距离场自由度为未知量的耦合系统。为确保数值求解的一致性与鲁棒性，本文不仅给出 pull-back SDF 子问题的有限元离散，而且系统推导其关于结构位移与距离场自由度的整体一致线性化，并进一步在罚函数法和增广拉格朗日法框架下构造接触残量的严格几何切线，最终形成一个闭合的 monolithic Newton 求解框架。
+
+本文的主要工作可概括如下：
+\begin{enumerate}[label=(\arabic*)]
+    \item 从连续体运动学与距离定义出发，提出时变 SDF 的输运--再定距统一理论；
+    \item 通过 pull-back 操作，将当前构形中的真实 SDF 问题转化为参考构形中的各向异性 Eikonal 问题；
+    \item 构造适用于参考窄带区域的变分最小二乘泛函，并给出 pull-back SDF 的有限元离散与一致切线；
+    \item 建立结构位移场与距离场的整体一致线性化，给出 monolithic Newton 系统及其 Schur 补等效切线；
+    \item 推导罚函数法与增广拉格朗日法下接触残量关于位移与距离场的严格几何线性化，为高保真柔性接触分析提供统一理论框架。
+\end{enumerate}
+
+全文结构如下：第~\ref{sec:geom-theory} 节建立时变 SDF 的几何理论；第~\ref{sec:anisotropic-eikonal} 节给出 pull-back 距离场与各向异性 Eikonal 主方程；第~\ref{sec:fem-sdf} 节推导其有限元离散与一致切线；第~\ref{sec:coupling} 节建立与结构位移场耦合的整体一致线性化；第~\ref{sec:contact-coupling} 节进一步给出接触残量在罚函数与增广拉格朗日框架下的严格几何线性化；第~\ref{sec:algorithms} 节总结 monolithic Newton 算法流程；第~\ref{sec:numerics} 节给出数值实验设计建议；最后在第~\ref{sec:conclusion} 节给出总结与展望。
+
+\section{时变符号距离场的几何理论}\label{sec:geom-theory}
+
+\subsection{参考构形、当前构形与界面输运}
+
+设参考构形中的物体区域为
+\begin{equation}
+\Omega_0 \subset \RR^3,
+\end{equation}
+其边界中潜在接触界面记为
+\begin{equation}
+\Gamma_0 \subset \partial\Omega_0.
+\end{equation}
+
+设结构在时刻 $t$ 的形变映射为
+\begin{equation}
+\chi_t : \Omega_0 \to \Omega_t,
+\qquad
+\bx = \chi_t(\bX),
+\end{equation}
+其中 $\bX$ 为参考坐标，$\bx$ 为当前坐标。相应地，当前构形中的界面定义为
+\begin{equation}
+\Gamma_t = \chi_t(\Gamma_0).
+\end{equation}
+
+上式表明，有限形变下界面的位置并不是某个标量场经验更新的结果，而是连续体形变映射对参考界面的直接输运。因而，时变 SDF 理论的第一原则应当是：\textbf{先由形变映射确定当前界面位置，再定义到该界面的符号距离。}
+
+\subsection{当前构形中的真实符号距离函数}
+
+在当前构形中，真实的符号距离函数定义为
+\begin{equation}
+\phi_t(\bx)=
+\begin{cases}
+-\dist(\bx,\Gamma_t), & \bx\in\Omega_t^{-},\\[1mm]
+0, & \bx\in\Gamma_t,\\[1mm]
+\phantom{-}\dist(\bx,\Gamma_t), & \bx\in\Omega_t^{+},
+\end{cases}
+\label{eq:true-sdf-current}
+\end{equation}
+其中 $\Omega_t^{-}$ 与 $\Omega_t^{+}$ 分别表示界面两侧区域，符号约定可由外法向或内法向统一给出。
+
+由定义~\eqref{eq:true-sdf-current} 立即得到
+\begin{equation}
+\phi_t(\bx)=0 \iff \bx\in\Gamma_t,
+\end{equation}
+并且在可微区域中满足
+\begin{equation}
+\norm{\gradx \phi_t(\bx)}=1.
+\label{eq:eikonal-current}
+\end{equation}
+
+式~\eqref{eq:eikonal-current} 是 signed distance 的本征性质。它表明，某个隐式函数即使与当前界面拥有相同的零等值面，只要不满足单位梯度条件，就不能被视为当前构形中的真实距离函数。
+
+\subsection{时变 SDF 的输运--再定距观点}
+
+基于上述定义，本文将时变 SDF 的构造理解为两个相互独立而又必须同时满足的步骤：
+\begin{enumerate}[label=\arabic*)]
+    \item \textbf{界面输运：} 由形变映射 $\chi_t$ 将参考界面 $\Gamma_0$ 输运为当前界面 $\Gamma_t$；
+    \item \textbf{距离再定距：} 在当前欧氏空间中，重新定义到 $\Gamma_t$ 的符号距离。
+\end{enumerate}
+
+因此，时变 SDF 的理论主张可概括为
+\begin{equation}
+\boxed{
+\text{时变 SDF} = \text{界面输运} + \text{距离再定距}.
+}
+\end{equation}
+
+这一观点与将参考 SDF 直接代数更新的做法本质不同。后者通常仅试图保留零等值面位置的近似正确性，而无法从定义上保证当前场仍然满足单位梯度条件。本文下面将说明，借助 pull-back 操作，可以将这一两步过程转化为固定参考域中的各向异性距离问题。
+
+\section{pull-back 距离场与各向异性 Eikonal 方程}\label{sec:anisotropic-eikonal}
+
+\subsection{pull-back 距离场的定义}
+
+定义参考构形中的 pull-back 场
+\begin{equation}
+\widehat{\phi}_t(\bX):=\phi_t(\chi_t(\bX)).
+\label{eq:pull-back-sdf}
+\end{equation}
+
+它表示：参考点 $\bX$ 在当前构形中的像点 $\chi_t(\bX)$ 到当前界面 $\Gamma_t$ 的真实符号距离。于是有
+\begin{equation}
+\widehat{\phi}_t(\bX)=0 \iff \bX\in\Gamma_0.
+\end{equation}
+
+因此，在参考构形中，零等值面始终固定在 $\Gamma_0$ 上，而随时间变化的是 ``距离度量'' 本身。
+
+\subsection{形变诱导度量}
+
+定义变形梯度
+\begin{equation}
+\bF_t(\bX)=\gradX \chi_t(\bX),
+\end{equation}
+以及右 Cauchy--Green 张量
+\begin{equation}
+\bC_t(\bX)=\bF_t(\bX)^T\bF_t(\bX).
+\label{eq:right-cauchy-green}
+\end{equation}
+
+再定义其逆张量
+\begin{equation}
+\bA_t(\bX)=\bC_t(\bX)^{-1}.
+\label{eq:A-def}
+\end{equation}
+
+由链式法则，对式~\eqref{eq:pull-back-sdf} 求梯度得
+\begin{equation}
+\gradX \widehat{\phi}_t = \bF_t^T\gradx \phi_t.
+\label{eq:chain-rule-pullback}
+\end{equation}
+
+将式~\eqref{eq:chain-rule-pullback} 代入当前构形中的单位梯度条件~\eqref{eq:eikonal-current}，可得
+\begin{equation}
+\left(\gradX \widehat{\phi}_t\right)^T \bC_t^{-1}
+\left(\gradX \widehat{\phi}_t\right)=1.
+\label{eq:anisotropic-eikonal-pre}
+\end{equation}
+
+式~\eqref{eq:anisotropic-eikonal-pre} 表明，pull-back 距离场在参考构形中满足一个由形变诱导度量控制的各向异性 Eikonal 方程。
+
+\subsection{主方程与边界条件}
+
+令参考界面附近的窄带区域为
+\begin{equation}
+U_0^\delta := \{\bX\in\Omega_0\,|\,|\phi_0(\bX)|<\delta\},
+\end{equation}
+其中 $\phi_0$ 为参考构形中的初始 signed distance。
+
+于是，pull-back SDF 的控制问题写为
+\begin{equation}
+\boxed{
+\begin{cases}
+\left(\gradX \widehat{\phi}_t\right)^T \bA_t\left(\gradX \widehat{\phi}_t\right)=1,
+& \bX\in U_0^\delta\setminus \Gamma_0,\\[1mm]
+\widehat{\phi}_t = 0,
+& \bX\in\Gamma_0,\\[1mm]
+\sign(\widehat{\phi}_t)=\sign(\phi_0),
+& \bX\in U_0^\delta.
+\end{cases}
+}
+\label{eq:anisotropic-eikonal-strong}
+\end{equation}
+
+其中 $\bA_t=\bC_t^{-1}$ 为形变诱导度量的逆张量。式~\eqref{eq:anisotropic-eikonal-strong} 是本文理论的核心主方程。它指出：在参考域中，需要求解的不是普通欧氏意义下的距离，而是相对于度量 $\bC_t$ 的距离函数。
+
+\subsection{当前构形中的距离场恢复}
+
+当参考域中的 pull-back 场 $\widehat{\phi}_t$ 求得之后，当前构形中的 SDF 可通过逆映射恢复为
+\begin{equation}
+\phi_t(\bx)=\widehat{\phi}_t\bigl(\chi_t^{-1}(\bx)\bigr).
+\label{eq:recover-current-sdf}
+\end{equation}
+
+相应地，当前构形中的单位法向由
+\begin{equation}
+\bn_t(\bx)=
+\frac{\gradx \phi_t(\bx)}{\norm{\gradx \phi_t(\bx)}}
+=
+\frac{\bF_t^{-T}\gradX \widehat{\phi}_t}{\norm{\bF_t^{-T}\gradX \widehat{\phi}_t}}
+\Bigg|_{\bX=\chi_t^{-1}(\bx)}.
+\label{eq:normal-recover}
+\end{equation}
+
+式~\eqref{eq:recover-current-sdf} 与式~\eqref{eq:normal-recover} 共同给出了接触检测所需的法向间隙与界面法向的统一表达。
+
+\section{各向异性 Eikonal 方程的变分最小二乘离散}\label{sec:fem-sdf}
+
+\subsection{残差函数与变分泛函}
+
+为了在有限元框架下稳定求解式~\eqref{eq:anisotropic-eikonal-strong}，本文采用变分最小二乘形式。为简洁起见，以下略去时刻下标 $t$，记
+\begin{equation}
+\phi := \widehat{\phi}_t,
+\qquad
+\bA := \bA_t.
+\end{equation}
+
+定义 Eikonal 残差函数
+\begin{equation}
+q(\phi) := (\gradX \phi)^T \bA \, \gradX \phi - 1.
+\label{eq:q-def}
+\end{equation}
+
+再引入一个锚定正则项，以增强窄带中的数值稳定性。取参考场 $\phi_0$，构造总泛函
+\begin{equation}
+\cJ(\phi)
+=
+\frac{1}{4}\int_{U_0^\delta} q(\phi)^2\dd\bX
++
+\frac{\beta}{2}\int_{U_0^\delta}(\phi-\phi_0)^2\dd\bX,
+\label{eq:functional-J}
+\end{equation}
+其中 $\beta\ge 0$ 为小的正则化参数。
+
+式~\eqref{eq:functional-J} 的第一项使得求解结果尽可能满足各向异性 Eikonal 方程，第二项则将解在窄带中适度约束到参考初始场附近，以避免由于局部非凸性或边界不充分导致的数值漂移。
+
+\subsection{一阶变分与弱形式}
+
+取试探函数 $\delta\phi \in V_0$，其中
+\begin{equation}
+V_0=\left\{\delta\phi\in H^1(U_0^\delta)\,\middle|\,\delta\phi=0\text{ on }\Gamma_0\right\}.
+\end{equation}
+
+对式~\eqref{eq:functional-J} 求一阶变分。由
+\begin{equation}
+\delta q = 2\,\gradX(\delta\phi)^T \bA\,\gradX\phi,
+\end{equation}
+得
+\begin{equation}
+\delta \cJ
+=
+\int_{U_0^\delta}
+q\,\gradX(\delta\phi)^T \bA\,\gradX\phi\dd\bX
++
+\beta\int_{U_0^\delta}(\phi-\phi_0)\,\delta\phi\dd\bX.
+\end{equation}
+
+因此，pull-back SDF 子问题的弱形式为：求 $\phi\in V$，使得对任意 $\delta\phi\in V_0$ 有
+\begin{equation}
+\boxed{
+G(\phi;\delta\phi)
+:=
+\int_{U_0^\delta}
+q\,\gradX(\delta\phi)^T \bA\,\gradX\phi\dd\bX
++
+\beta\int_{U_0^\delta}(\phi-\phi_0)\,\delta\phi\dd\bX
+=0.
+}
+\label{eq:weak-sdf}
+\end{equation}
+
+\subsection{有限元离散}
+
+设窄带区域 $U_0^\delta$ 被剖分为有限元网格 $\cT_h^\phi$，取有限元空间 $V_h\subset H^1(U_0^\delta)$。令 pull-back 距离场离散为
+\begin{equation}
+\phi_h(\bX)=\sum_{A=1}^{n_\phi} N_A(\bX) a_A,
+\label{eq:phi-fe}
+\end{equation}
+其中 $N_A$ 为 SDF 自由度对应的形函数，$a_A$ 为待求自由度。
+
+记
+\begin{equation}
+\bN_\phi = [N_1,\dots,N_{n_\phi}],
+\qquad
+\bB_\phi = [\gradX N_1,\dots,\gradX N_{n_\phi}],
+\end{equation}
+则
+\begin{equation}
+\phi_h = \bN_\phi \ba,
+\qquad
+\bg_\phi := \gradX\phi_h = \bB_\phi \ba.
+\label{eq:phi-gradient-fe}
+\end{equation}
+
+由式~\eqref{eq:q-def} 得离散残差标量
+\begin{equation}
+q_h = \bg_\phi^T \bA\,\bg_\phi - 1.
+\label{eq:q-h}
+\end{equation}
+
+于是 pull-back SDF 子问题的离散残量向量为
+\begin{equation}
+\boxed{
+\bR_\phi(\ba,\bd)
+=
+\int_{U_0^\delta}
+q_h\,\bB_\phi^T \bA\,\bg_\phi\dd\bX
++
+\beta\int_{U_0^\delta}
+\bN_\phi^T(\phi_h-\phi_0)\dd\bX.
+}
+\label{eq:Rphi-discrete}
+\end{equation}
+
+注意到这里显式写出 $\bR_\phi(\ba,\bd)$，因为张量 $\bA=\bC^{-1}$ 由结构位移场决定，因此 pull-back SDF 子问题与结构位移子问题天然耦合。
+
+\subsection{子问题关于 SDF 自由度的一致切线}
+
+对式~\eqref{eq:Rphi-discrete} 关于 $\ba$ 求导，得
+\begin{equation}
+\boxed{
+\bK_{\phi\phi}
+=
+\int_{U_0^\delta}
+\left[
+2\,(\bB_\phi^T \bA\,\bg_\phi)(\bB_\phi^T \bA\,\bg_\phi)^T
++
+q_h\,\bB_\phi^T \bA\,\bB_\phi
+\right]\dd\bX
++
+\beta\int_{U_0^\delta}\bN_\phi^T\bN_\phi\dd\bX.
+}
+\label{eq:Kphiphi-final}
+\end{equation}
+
+式~\eqref{eq:Kphiphi-final} 是 SDF 子问题内部的一致切线矩阵，其结构由三部分组成：非线性外积项、残差加权项与正则质量项。
+
+\subsection{单元高斯点装配形式}
+
+对任意窄带体单元 $e\in\cT_h^\phi$，在高斯点 $\bX_{gp}$ 处，先计算
+\begin{equation}
+\phi_{gp}=\bN_\phi \ba^{(e)},
+\qquad
+\bg = \bB_\phi \ba^{(e)},
+\qquad
+q = \bg^T \bA\,\bg - 1.
+\end{equation}
+
+再定义辅助向量
+\begin{equation}
+\boldsymbol{m} := \bB_\phi^T \bA\,\bg.
+\end{equation}
+
+则该高斯点的单元残量贡献可写为
+\begin{equation}
+\boxed{
+\bR_{\phi,gp}^{(e)}
+=
+q\,\boldsymbol{m}\,w_{gp}\det \bm{J}
++
+\beta\,\bN_\phi^T(\phi_{gp}-\phi_0(\bX_{gp}))\,w_{gp}\det \bm{J}.
+}
+\label{eq:Rphi-gp}
+\end{equation}
+
+同样地，该高斯点的切线贡献为
+\begin{equation}
+\boxed{
+\bK_{\phi\phi,gp}^{(e)}
+=
+\left[
+2\,\boldsymbol{m}\boldsymbol{m}^T + q\,\bB_\phi^T \bA\,\bB_\phi + \beta\,\bN_\phi^T\bN_\phi
+\right]w_{gp}\det \bm{J}.
+}
+\label{eq:Kphiphi-gp}
+\end{equation}
+
+\section{与结构位移场耦合的整体一致线性化}\label{sec:coupling}
+
+\subsection{结构位移离散与诱导度量}
+
+设结构位移场离散为
+\begin{equation}
+\bu_h(\bX)=\sum_{I=1}^{n_u} \bm{M}_I(\bX)\, d_I,
+\end{equation}
+其中 $\bm{M}_I$ 为结构位移插值矩阵，$d_I$ 为位移自由度。
+
+于是形变映射为
+\begin{equation}
+\chi_h(\bX)=\bX+\bu_h(\bX),
+\end{equation}
+对应的变形梯度为
+\begin{equation}
+\bF_h(\bX)=\bI+\gradX \bu_h(\bX),
+\end{equation}
+右 Cauchy--Green 张量为
+\begin{equation}
+\bC_h(\bX)=\bF_h(\bX)^T\bF_h(\bX),
+\end{equation}
+以及
+\begin{equation}
+\bA_h(\bX)=\bC_h(\bX)^{-1}.
+\end{equation}
+
+因此，式~\eqref{eq:Rphi-discrete} 中的 $\bA$ 并不是外部给定量，而是位移自由度 $\bd$ 的函数。这意味着 pull-back SDF 子问题的残量应记为
+\begin{equation}
+\bR_\phi = \bR_\phi(\ba,\bd).
+\end{equation}
+
+\subsection{关于结构位移的灵敏度：\texorpdfstring{$\bm{K}_{\phi u}$}{K_{\phi u}}}
+
+定义
+\begin{equation}
+\bg_\phi = \bB_\phi \ba,
+\qquad
+q_h = \bg_\phi^T \bA_h \bg_\phi -1.
+\end{equation}
+
+对 $\bR_\phi$ 关于位移自由度 $\bd$ 求导，得
+\begin{equation}
+\Delta \bR_\phi
+=
+\int_{U_0^\delta}
+\Big[
+(\bg_\phi^T\Delta\bA_h\,\bg_\phi)\,\bB_\phi^T\bA_h\bg_\phi
++
+q_h\,\bB_\phi^T\Delta\bA_h\,\bg_\phi
+\Big]\dd\bX.
+\label{eq:dRphi-general}
+\end{equation}
+
+由矩阵逆的变分公式可得
+\begin{equation}
+\Delta\bA_h = -\bA_h\,(\Delta \bC_h)\,\bA_h,
+\label{eq:dA-general}
+\end{equation}
+而
+\begin{equation}
+\Delta \bC_h = \bF_h^T\Delta \bF_h + (\Delta\bF_h)^T\bF_h.
+\label{eq:dC-general}
+\end{equation}
+
+若对单个结构自由度 $d_J^\alpha$ 求偏导，则有
+\begin{equation}
+\frac{\partial \bF_h}{\partial d_J^\alpha}
+=
+\bm{e}_\alpha\otimes \gradX M_J,
+\end{equation}
+从而
+\begin{equation}
+\boxed{
+\frac{\partial \bA_h}{\partial d_J^\alpha}
+=
+-\bA_h
+\left[
+\bF_h^T(\bm{e}_\alpha\otimes \gradX M_J)
++
+(\bm{e}_\alpha\otimes \gradX M_J)^T\bF_h
+\right]
+\bA_h.
+}
+\label{eq:A-derivative-column}
+\end{equation}
+
+因此，$\bm{K}_{\phi u}$ 的 $(A,(J\alpha))$ 分量可写为
+\begin{equation}
+\boxed{
+[K_{\phi u}]_{A,(J\alpha)}
+=
+\int_{U_0^\delta}
+\Big[
+(\bg_\phi^T\bA_{,J\alpha}\,\bg_\phi)\,m_A
++
+q_h\,\nabla N_A^T\bA_{,J\alpha}\,\bg_\phi
+\Big]\dd\bX,
+}
+\label{eq:Kphiu-component}
+\end{equation}
+其中
+\begin{equation}
+\bm{m}=\bB_\phi^T\bA_h\bg_\phi,
+\qquad
+m_A=(\bm{m})_A,
+\qquad
+\bA_{,J\alpha}:=\frac{\partial \bA_h}{\partial d_J^\alpha}.
+\end{equation}
+
+在高斯点实现中，式~\eqref{eq:Kphiu-component} 可按结构自由度逐列装配。对每一列，先计算
+\begin{equation}
+ s_{J\alpha}:=\bg_\phi^T\bA_{,J\alpha}\bg_\phi,
+ \qquad
+ \bm{r}_{J\alpha}:=\bB_\phi^T\bA_{,J\alpha}\bg_\phi,
+\end{equation}
+则
+\begin{equation}
+\boxed{
+[\bm{K}_{\phi u,gp}^{(e)}]_{:,J\alpha}
+=
+\left[
+s_{J\alpha}\,\bm{m}
++
+q_h\,\bm{r}_{J\alpha}
+\right]w_{gp}\det\bm{J}.
+}
+\label{eq:Kphiu-gp}
+\end{equation}
+
+\subsection{monolithic 子问题的块结构}
+
+综上，pull-back SDF 子系统对应的离散方程及一致切线可写为
+\begin{equation}
+\boxed{
+\bm{R}_\phi(\ba,\bd)=\bm{0},
+\qquad
+\Delta \bm{R}_\phi
+=
+\bm{K}_{\phi\phi}\Delta\ba + \bm{K}_{\phi u}\Delta\bd.
+}
+\label{eq:sdf-subsystem-linearized}
+\end{equation}
+
+其中 $\bm{K}_{\phi\phi}$ 与 $\bm{K}_{\phi u}$ 已由式~\eqref{eq:Kphiphi-final} 和式~\eqref{eq:Kphiu-component} 给出。这一部分构成了后续整体 monolithic Newton 系统的第二行块方程。
+
+\section{接触几何量与接触残量的一致线性化}\label{sec:contact-coupling}
+
+\subsection{参考查询点、接触间隙与法向}
+
+设从面参考界面为 $\Gamma_s^0$，在其上取一个固定参考采样点。该采样点在当前构形中的位置记为
+\begin{equation}
+\bx_s = \bx_s(\bd).
+\end{equation}
+
+主侧由 pull-back SDF 表示，其当前几何通过映射 $\chi_h$ 给出。定义参考查询点 $\bX_c$ 满足
+\begin{equation}
+\bx_s = \chi_h(\bX_c;\bd).
+\label{eq:implicit-query-point}
+\end{equation}
+
+于是法向间隙定义为
+\begin{equation}
+\boxed{
+g_n(\bd,\ba)=\phi_h(\bX_c(\bd);\ba).
+}
+\label{eq:gn-def}
+\end{equation}
+
+在查询点处记
+\begin{equation}
+\bp := \gradX \phi_h(\bX_c),
+\qquad
+\bH_\phi := \nabla_X^2 \phi_h(\bX_c).
+\end{equation}
+
+当前构形中的法向由
+\begin{equation}
+\bn=
+\frac{\bF_h(\bX_c)^{-T}\bp}{\norm{\bF_h(\bX_c)^{-T}\bp}}
+\label{eq:normal-query}
+\end{equation}
+给出。需要指出的是，若采用线性 SDF 体单元，则单元内部梯度为常值，因此 $\bH_\phi=\bm{0}$；若采用二次及以上单元，则可进一步获得曲率信息。
+
+\subsection{接触间隙的一阶导数}
+
+对式~\eqref{eq:implicit-query-point} 取变分，有
+\begin{equation}
+\delta \bx_s
+=
+\bF_h(\bX_c)\,\delta \bX_c + \delta \bu_m(\bX_c),
+\end{equation}
+因此
+\begin{equation}
+\delta \bX_c
+=
+\bF_h(\bX_c)^{-1}
+\left(
+\delta \bx_s - \delta \bu_m(\bX_c)
+\right).
+\label{eq:dXc}
+\end{equation}
+
+将其写成关于结构自由度的线性算子形式：定义
+\begin{equation}
+\delta\bX_c = \bE\,\delta \bd,
+\label{eq:E-def}
+\end{equation}
+其中 $\bE = \partial \bX_c / \partial \bd$。
+
+由式~\eqref{eq:gn-def} 可得
+\begin{equation}
+\delta g_n = \bp^T\delta \bX_c + \bN_\phi(\bX_c)\,\delta\ba.
+\end{equation}
+定义
+\begin{equation}
+\boxed{
+\bm{G}_u := \bp^T\bE,
+\qquad
+\bm{G}_a := \bN_\phi(\bX_c),
+}
+\label{eq:Gu-Ga-def}
+\end{equation}
+则
+\begin{equation}
+\boxed{
+\delta g_n = \bm{G}_u\,\delta\bd + \bm{G}_a\,\delta\ba.
+}
+\label{eq:dg-final}
+\end{equation}
+
+式~\eqref{eq:dg-final} 给出了法向间隙对结构位移与 pull-back SDF 自由度的一阶灵敏度，是接触残量线性化的基础。
+
+\subsection{罚函数法与增广拉格朗日法的统一表述}
+
+引入一维接触势函数 $\psi(g_n)$，并定义
+\begin{equation}
+\lambda_n := \psi'(g_n),
+\qquad
+k_n := \psi''(g_n).
+\label{eq:lambdan-kn}
+\end{equation}
+
+则法向接触虚功可写为
+\begin{equation}
+\delta W_c
+=
+\int_{\Gamma_s^0} \lambda_n\, \delta g_n\,\dd\Gamma_0.
+\end{equation}
+
+于是结构接触残量为
+\begin{equation}
+\boxed{
+\bm{R}_u^c(\bd,\ba)
+=
+\int_{\Gamma_s^0}
+\bm{G}_u^T\,\lambda_n(g_n(\bd,\ba))\,\dd\Gamma_0.
+}
+\label{eq:Ru-contact}
+\end{equation}
+
+对于罚函数法，可取
+\begin{equation}
+\psi(g_n)=\frac{\epsilon_n}{2}\Mac{-g_n}^2,
+\end{equation}
+在活动接触区有 $k_n=\epsilon_n$。对于增广拉格朗日法，可在活动集上写成
+\begin{equation}
+\lambda_n = \lambda_n^{(m)} + \epsilon_n g_n,
+\end{equation}
+同样满足 $k_n=\epsilon_n$。因此，后续线性化可通过 $\lambda_n$ 与 $k_n$ 的统一记号处理。
+
+\subsection{严格几何线性化：\texorpdfstring{$\Delta \bm{G}_u$}{\Delta G_u}}
+
+为获得结构接触残量的严格几何切线，需要进一步线性化 $\bm{G}_u$。由式~\eqref{eq:Gu-Ga-def}，有
+\begin{equation}
+\bm{G}_u = \bp^T\bE.
+\end{equation}
+
+因此
+\begin{equation}
+\Delta \bm{G}_u = (\Delta \bp)^T\bE + \bp^T(\Delta \bE).
+\label{eq:dGu-split}
+\end{equation}
+
+对梯度 $\bp=\gradX\phi_h(\bX_c)$，有
+\begin{equation}
+\Delta \bp = \bH_\phi\,\Delta \bX_c + \bB_\phi(\bX_c)\,\Delta \ba.
+\label{eq:dp-final}
+\end{equation}
+
+另一方面，由 $\bE=\bF_h^{-1}\bm{L}$ 可得
+\begin{equation}
+\Delta \bE
+=
+-\bF_h^{-1}(\Delta \bF_h)\bE
++
+\bF_h^{-1}\Delta\bm{L},
+\label{eq:dE-final}
+\end{equation}
+其中 $\bm{L}$ 为相对位移映射算子，$\Delta\bm{L}$ 反映主侧插值点沿参考域移动带来的变化。
+
+将式~\eqref{eq:dp-final} 与式~\eqref{eq:dE-final} 代入式~\eqref{eq:dGu-split}，整理可得
+\begin{equation}
+\boxed{
+\Delta \bm{G}_u
+=
+\bm{H}_{uu}^{(g)}\Delta\bd + \bm{H}_{u\phi}^{(g)}\Delta\ba,
+}
+\label{eq:dGu-final}
+\end{equation}
+其中
+\begin{equation}
+\boxed{
+\bm{H}_{uu}^{(g)}
+=
+\bE^T\bH_\phi\bE + \bm{\mathcal G}_F + \bm{\mathcal G}_L,
+}
+\end{equation}
+\begin{equation}
+\boxed{
+\bm{H}_{u\phi}^{(g)} = \bE^T\bB_\phi(\bX_c),
+}
+\end{equation}
+而
+\begin{equation}
+\bm{\mathcal G}_F[\Delta\bd] = -\bp^T\bF_h^{-1}(\Delta\bF_h)\bE,
+\qquad
+\bm{\mathcal G}_L[\Delta\bd] = \bp^T\bF_h^{-1}\Delta \bm{L}.
+\end{equation}
+
+这三部分具有清晰的几何意义：
+\begin{itemize}
+    \item $\bE^T\bH_\phi\bE$：pull-back SDF 曲率项；
+    \item $\bm{\mathcal G}_F$：由形变梯度变化引起的逆映射几何项；
+    \item $\bm{\mathcal G}_L$：由主侧插值图在参考域内移动引起的映射项。
+\end{itemize}
+
+\subsection{结构接触残量的严格一致线性化}
+
+对式~\eqref{eq:Ru-contact} 取增量，有
+\begin{equation}
+\Delta\bm{R}_u^c
+=
+\int_{\Gamma_s^0}
+\left[
+(\Delta\bm{G}_u^T)\lambda_n + \bm{G}_u^T\Delta\lambda_n
+\right]\dd\Gamma_0.
+\end{equation}
+
+利用
+\begin{equation}
+\Delta\lambda_n = k_n\,\Delta g_n = k_n(\bm{G}_u\Delta\bd + \bm{G}_a\Delta\ba),
+\end{equation}
+以及式~\eqref{eq:dGu-final}，可得
+\begin{equation}
+\Delta\bm{R}_u^c
+=
+\bm{K}_{uu}^c\Delta\bd + \bm{K}_{u\phi}^c\Delta\ba,
+\end{equation}
+其中
+\begin{equation}
+\boxed{
+\bm{K}_{uu}^c
+=
+\int_{\Gamma_s^0}
+\left[
+k_n\,\bm{G}_u^T\bm{G}_u + \lambda_n\,\bm{H}_{uu}^{(g)}
+\right]\dd\Gamma_0,
+}
+\label{eq:Kuu-contact}
+\end{equation}
+以及
+\begin{equation}
+\boxed{
+\bm{K}_{u\phi}^c
+=
+\int_{\Gamma_s^0}
+\left[
+k_n\,\bm{G}_u^T\bm{G}_a + \lambda_n\,\bm{H}_{u\phi}^{(g)}
+\right]\dd\Gamma_0.
+}
+\label{eq:Kuphi-contact}
+\end{equation}
+
+由于 $\bm{H}_{u\phi}^{(g)}=\bE^T\bB_\phi(\bX_c)$，于是
+\begin{equation}
+\boxed{
+\bm{K}_{u\phi}^c
+=
+\int_{\Gamma_s^0}
+\left[
+k_n\,\bm{G}_u^T\bm{G}_a + \lambda_n\,\bE^T\bB_\phi(\bX_c)
+\right]\dd\Gamma_0.
+}
+\label{eq:Kuphi-final}
+\end{equation}
+
+式~\eqref{eq:Kuu-contact} 与式~\eqref{eq:Kuphi-final} 给出了结构接触残量关于位移与 pull-back SDF 自由度的严格一致切线。
+
+\section{整体 monolithic Newton 系统与 Schur 补闭合}\label{sec:algorithms}
+
+\subsection{总残量与块矩阵切线}
+
+记结构内部残量为
+\begin{equation}
+\bm{R}_u^{\mathrm{int}}(\bd)-\bm{R}_u^{\mathrm{ext}},
+\end{equation}
+则总结构残量为
+\begin{equation}
+\bm{R}_u(\bd,\ba)
+=
+\bm{R}_u^{\mathrm{int}}(\bd)-\bm{R}_u^{\mathrm{ext}}+\bm{R}_u^c(\bd,\ba).
+\end{equation}
+
+总系统残量记为
+\begin{equation}
+\boxed{
+\bm{R}(\bd,\ba)=
+\begin{bmatrix}
+\bm{R}_u(\bd,\ba)\\[1mm]
+\bm{R}_\phi(\ba,\bd)
+\end{bmatrix}.
+}
+\label{eq:global-residual}
+\end{equation}
+
+对应的一致线性化写为
+\begin{equation}
+\boxed{
+\begin{bmatrix}
+\bm{K}_{uu} & \bm{K}_{u\phi}\\[1mm]
+\bm{K}_{\phi u} & \bm{K}_{\phi\phi}
+\end{bmatrix}
+\begin{bmatrix}
+\Delta\bd\\[1mm]
+\Delta\ba
+\end{bmatrix}
+=
+-
+\begin{bmatrix}
+\bm{R}_u\\[1mm]
+\bm{R}_\phi
+\end{bmatrix},
+}
+\label{eq:monolithic-newton}
+\end{equation}
+其中
+\begin{equation}
+\bm{K}_{uu} = \bm{K}_{uu}^{\mathrm{int}} + \bm{K}_{uu}^c,
+\qquad
+\bm{K}_{u\phi}=\bm{K}_{u\phi}^c.
+\end{equation}
+
+式~\eqref{eq:monolithic-newton} 即为本文最终得到的 monolithic Newton 闭合系统。它表明：结构位移与 pull-back SDF 不再是弱耦合或外场驱动关系，而是共享统一残量与一致切线的双向耦合未知量。
+
+\subsection{Schur 补等效一致切线}
+
+若在每个牛顿步内第二行子问题满足
+\begin{equation}
+\bm{R}_\phi=\bm{0},
+\end{equation}
+则由第二行可得
+\begin{equation}
+\Delta\ba = -\bm{K}_{\phi\phi}^{-1}\bm{K}_{\phi u}\Delta\bd.
+\end{equation}
+
+代回第一行，得到仅作用于结构自由度上的等效一致切线
+\begin{equation}
+\boxed{
+\bm{K}_{\mathrm{eff}}
+=
+\bm{K}_{uu} - \bm{K}_{u\phi}\bm{K}_{\phi\phi}^{-1}\bm{K}_{\phi u}.
+}
+\label{eq:schur-effective}
+\end{equation}
+
+式~\eqref{eq:schur-effective} 具有非常清晰的物理含义：
+\begin{itemize}
+    \item $\bm{K}_{uu}$ 描述结构自身刚度与直接接触刚度；
+    \item $\bm{K}_{u\phi}\bm{K}_{\phi\phi}^{-1}\bm{K}_{\phi u}$ 则反映了 ``位移 $\to$ 诱导度量 $\to$ 距离场 $\to$ 接触反馈'' 的隐式修正。
+\end{itemize}
+
+这也是本理论框架相较于将 SDF 视为外部几何场的做法的本质区别之一。
+
+\subsection{整体算法流程}
+
+基于上述推导，一个单步 monolithic Newton 迭代可概括如下。
+
+\begin{algorithm}[H]
+\caption{结构位移--pull-back SDF 耦合的 monolithic Newton 算法}
+\begin{algorithmic}[1]
+\State 给定初值 $\bd^{(0)},\ba^{(0)}$
+\For{$k=0,1,2,\dots$ 直到收敛}
+    \State 由 $\bd^{(k)}$ 计算结构单元上的 $\bF_h,\bC_h,\bA_h$
+    \State 在窄带体单元上装配 $\bm{R}_\phi,\bm{K}_{\phi\phi},\bm{K}_{\phi u}$
+    \State 在从面接触积分点上求解查询点 $\bX_c$，评价 $\phi_h(\bX_c),\gradX\phi_h(\bX_c)$
+    \State 计算 $g_n,\lambda_n,k_n,\bm{G}_u,\bm{G}_a$
+    \State 装配 $\bm{R}_u^c,\bm{K}_{uu}^c,\bm{K}_{u\phi}^c$
+    \State 装配总残量 $\bm{R}$ 与总切线块矩阵
+    \State 求解线性系统
+    \[
+    \begin{bmatrix}
+    \bm{K}_{uu} & \bm{K}_{u\phi}\\
+    \bm{K}_{\phi u} & \bm{K}_{\phi\phi}
+    \end{bmatrix}
+    \begin{bmatrix}
+    \Delta\bd\\
+    \Delta\ba
+    \end{bmatrix}
+    =-
+    \begin{bmatrix}
+    \bm{R}_u\\
+    \bm{R}_\phi
+    \end{bmatrix}
+    \]
+    \State 更新
+    \[
+    \bd^{(k+1)}=\bd^{(k)}+\Delta\bd,
+    \qquad
+    \ba^{(k+1)}=\ba^{(k)}+\Delta\ba
+    \]
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{数值实验设计建议}\label{sec:numerics}
+
+为了验证本文理论与算法的正确性、稳定性与工程适用性，建议按以下三类数值实验展开。
+
+\subsection{几何与距离场层面的验证}
+
+首先需要验证 pull-back SDF 理论本身是否正确，建议至少包含以下算例：
+\begin{enumerate}[label=\arabic*)]
+    \item \textbf{刚体运动验证：} 对参考界面施加纯平移或纯转动，验证在刚体运动下 pull-back SDF 能否保持精确距离性质；
+    \item \textbf{单轴拉伸与纯剪切：} 比较各向异性 Eikonal 重构场与简单代数更新场的差异，检验形变诱导度量的必要性；
+    \item \textbf{窄带重构误差：} 在不同窄带宽度 $\delta$、不同单元阶次下评估距离误差与法向误差。
+\end{enumerate}
+
+\subsection{接触计算层面的验证}
+
+在接触层面，建议设置如下算例：
+\begin{enumerate}[label=\arabic*)]
+    \item \textbf{刚性压头压弹性块：} 检验接触开始时刻、反力--位移曲线与接触区分布；
+    \item \textbf{大滑移接触：} 验证通过查询点逆映射和 pull-back SDF 计算得到的法向间隙与法向是否稳定；
+    \item \textbf{非匹配离散下的接触鲁棒性：} 评估接触反力、穿透量与 Newton 收敛性。
+\end{enumerate}
+
+\subsection{数值求解层面的验证}
+
+针对整体一致线性化，可重点比较：
+\begin{enumerate}[label=\arabic*)]
+    \item 忽略 $\bm{K}_{u\phi},\bm{K}_{\phi u}$ 的弱耦合策略与本文 monolithic 策略的迭代收敛性；
+    \item 忽略严格几何项 $\bm{H}_{uu}^{(g)}$ 与保留严格几何项时的牛顿收敛行为；
+    \item 线性 SDF 单元与二次 SDF 单元下曲率项 $\bH_\phi$ 的影响。
+\end{enumerate}
+
+\section{讨论}\label{sec:discussion}
+
+本文建立的理论框架具有以下特点。
+
+首先，它从定义上区分了``界面输运''与``距离函数''这两个概念，从而避免了将 SDF 简单当作任意隐式场更新的理论混淆。其次，通过 pull-back 操作，将当前构形中的几何距离问题转化为参考构形中的各向异性 Eikonal 问题，统一了时变界面、距离场与形变诱导度量之间的关系。再次，在数值实现上，变分最小二乘形式使得各向异性 Eikonal 方程能够自然嵌入有限元框架，并进一步与结构场和接触场构成闭合的 monolithic Newton 系统。
+
+当然，本文草稿中仍有若干值得进一步发展的方向。其一，当前采用的是变分最小二乘离散，后续也可以探索更接近 Hamilton--Jacobi 方程粘性解理论的 DG、稳定化 FEM 或局部 fast marching 类型离散。其二，接触残量中主从映射 $\bX_c$ 的严格二阶几何导数仍可进一步展开并实现，从而得到更高阶一致切线。其三，若进一步考虑摩擦接触，则还需将 pull-back SDF 提供的法向与切向基、接触状态切换以及摩擦互补条件统一纳入该耦合框架。其四，当前草稿主要针对一条界面或一类主侧 SDF 的情形，后续可自然推广到多接触区、自接触以及双边距离场耦合问题。
+
+\section{结论}\label{sec:conclusion}
+
+本文从连续体运动学与距离定义出发，建立了一套面向有限形变接触问题的时变符号距离场统一理论。本文的核心思想是：时变 SDF 不应被直接代数更新，而应由界面输运与距离再定距共同定义。基于这一观点，本文通过 pull-back 操作将当前构形中的真实 signed distance 问题转化为参考构形中的各向异性 Eikonal 方程，并进一步构造了其变分最小二乘有限元离散形式。
+
+在此基础上，本文系统推导了 pull-back SDF 子问题关于距离场自由度与结构位移自由度的一致切线，建立了结构位移场与 SDF 场的整体一致线性化，并在罚函数法与增广拉格朗日法下推导了接触残量的严格几何切线。最终，得到一个由结构残量与 SDF 残量共同组成的 monolithic Newton 闭合系统，以及相应的 Schur 补等效一致切线。
+
+本文所建立的理论与算法框架为有限形变下高保真时变 SDF 的构造及其与接触力学的统一耦合提供了一条更具几何一致性与数值一致性的路线。后续工作可围绕更高阶离散、摩擦接触、自接触、多界面耦合以及可微求解等方向进一步展开。
+
+\section*{说明}
+
+本文件为中文详细 LaTeX 论文草稿，重点放在理论推导、有限元离散与一致线性化框架上。若后续用于正式投稿，建议进一步补充以下内容：
+\begin{itemize}
+    \item 文献综述与参考文献条目；
+    \item 与已有 SDF 更新方法、level-set reinitialization 方法、接触 mortar / contact-domain 方法的定量对比；
+    \item 数值实验结果图、误差表格与收敛曲线；
+    \item 针对特定材料模型、时间离散格式与摩擦模型的附加推导。
+\end{itemize}
+
+\end{document}
