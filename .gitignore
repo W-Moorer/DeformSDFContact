@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / distributed files
+__pycache__/
+*.pyc
+*.pyo
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Output files
+*.h5
+*.xdmf
+*.vtk
+*.vtu
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.venv/
+venv/
