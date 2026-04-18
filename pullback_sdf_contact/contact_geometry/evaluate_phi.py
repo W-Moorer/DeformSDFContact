@@ -39,19 +39,30 @@ def eval_scalar_function_data(function, X_c, cell_id):
     degree = V.ufl_element().degree()
     xi = reference_coordinates(domain, cell_id, X_c)
     element = _scalar_basix_element(cell_name, degree)
-    tab = element.tabulate(1, np.asarray([xi], dtype=np.float64))
+    tab = element.tabulate(2, np.asarray([xi], dtype=np.float64))
 
     basis = tab[0, 0, :]
     grad_ref = np.vstack([tab[1, 0, :], tab[2, 0, :], tab[3, 0, :]])
+    hess_ref = np.array(
+        [
+            [tab[basix.index(2, 0, 0), 0, :], tab[basix.index(1, 1, 0), 0, :], tab[basix.index(1, 0, 1), 0, :]],
+            [tab[basix.index(1, 1, 0), 0, :], tab[basix.index(0, 2, 0), 0, :], tab[basix.index(0, 1, 1), 0, :]],
+            [tab[basix.index(1, 0, 1), 0, :], tab[basix.index(0, 1, 1), 0, :], tab[basix.index(0, 0, 2), 0, :]],
+        ],
+        dtype=np.float64,
+    )
 
     mins, maxs = cell_bounds(domain, cell_id)
     jac = np.diag(maxs - mins)
+    jac_inv = np.linalg.inv(jac)
     grad_phys = np.linalg.solve(jac.T, grad_ref)
 
     cell_dofs = V.dofmap.list.links(cell_id)
     coeffs = function.vector.array_r[cell_dofs]
     value = float(basis @ coeffs)
     grad = grad_phys @ coeffs
+    hess = np.tensordot(hess_ref, coeffs, axes=(2, 0))
+    hess = jac_inv.T @ hess @ jac_inv
 
     ndofs = function.vector.getLocalSize()
     N_row = np.zeros(ndofs, dtype=np.float64)
@@ -63,6 +74,7 @@ def eval_scalar_function_data(function, X_c, cell_id):
     return {
         "value": value,
         "grad": grad,
+        "hess": hess,
         "N_row": N_row,
         "B_mat": B_mat,
         "cell_dofs": np.asarray(cell_dofs, dtype=np.int32),
@@ -79,14 +91,16 @@ def eval_vector_function_data(function, X_c, cell_id):
     value = np.zeros(gdim, dtype=np.float64)
     grad = np.zeros((gdim, gdim), dtype=np.float64)
     N_mat = np.zeros((gdim, ndofs), dtype=np.float64)
+    B_tensor = np.zeros((gdim, gdim, ndofs), dtype=np.float64)
 
     for i in range(gdim):
         data_i = eval_scalar_function_data(function.sub(i), X_c, cell_id)
         value[i] = data_i["value"]
         grad[i, :] = data_i["grad"]
         N_mat[i, :] = data_i["N_row"]
+        B_tensor[i, :, :] = data_i["B_mat"]
 
-    return {"value": value, "grad": grad, "N_mat": N_mat}
+    return {"value": value, "grad": grad, "N_mat": N_mat, "B_tensor": B_tensor}
 
 
 def eval_phi_quantities(X_c, cell_id, phi_function):
@@ -101,7 +115,7 @@ def eval_phi_quantities(X_c, cell_id, phi_function):
     data = eval_scalar_function_data(phi_function, X_c, cell_id)
     phi_val = data["value"]
     grad_phi = data["grad"]
-    hess_phi = None
+    hess_phi = data["hess"]
     Nphi_row = data["N_row"]
     Bphi_mat = data["B_mat"]
     return phi_val, grad_phi, hess_phi, Nphi_row, Bphi_mat

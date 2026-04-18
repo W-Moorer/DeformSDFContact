@@ -8,7 +8,7 @@ from petsc4py import PETSc
 from dolfinx import fem
 
 from config import MeshConfig, SDFConfig
-from contact_geometry.evaluate_phi import cell_bounds, eval_phi_quantities, eval_vector_function_data
+from contact_geometry.evaluate_phi import cell_bounds, eval_vector_function_data
 from contact_geometry.query_point import solve_query_point
 from contact_geometry.sensitivities import compute_gap_sensitivities
 from coupled_solver.staggered import solve_staggered
@@ -120,7 +120,11 @@ def main():
     X_c, converged, iters = solve_query_point(
         x_s, u, candidate_cell=candidate_cell, X_init=X_slave_ref
     )
-    g_n, normal, E, G_u, G_a = compute_gap_sensitivities(X_c, candidate_cell, u, phi)
+    sens = compute_gap_sensitivities(X_c, candidate_cell, u, phi)
+    g_n = sens["g_n"]
+    E = sens["E"]
+    G_u = sens["G_u"]
+    G_a = sens["G_a"]
     query_lin = E @ du_dir.vector.array_r
     gap_lin = float(G_u @ du_dir.vector.array_r + G_a @ da_dir.vector.array_r)
 
@@ -159,7 +163,7 @@ def main():
         X_eps, conv_eps, it_eps = solve_query_point(
             x_s, u, candidate_cell=candidate_cell, X_init=X_c
         )
-        g_eps, _, _, _, _ = compute_gap_sensitivities(X_eps, candidate_cell, u, phi)
+        g_eps = compute_gap_sensitivities(X_eps, candidate_cell, u, phi)["g_n"]
         fd = (g_eps - g_n) / eps
         abs_err = abs(fd - gap_lin)
         rel_err = abs_err / (abs(gap_lin) + 1e-16)

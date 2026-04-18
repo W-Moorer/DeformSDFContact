@@ -143,7 +143,14 @@ def compute_contact_state(u, phi, candidate_cell, x_s, X_init, penalty):
     X_c, converged, iters = solve_query_point(
         x_s, u, candidate_cell=candidate_cell, X_init=X_init
     )
-    g_n, normal, E, G_u, G_a = compute_gap_sensitivities(X_c, candidate_cell, u, phi)
+    sens = compute_gap_sensitivities(X_c, candidate_cell, u, phi)
+    g_n = sens["g_n"]
+    normal = sens["normal"]
+    E = sens["E"]
+    G_u = sens["G_u"]
+    G_a = sens["G_a"]
+    H_uphi_g = sens["H_uphi_g"]
+    H_uu_g = sens["H_uu_g"]
     R_uc, lam, kn = contact_residual_single_point(g_n, G_u, penalty)
     return {
         "X_c": X_c,
@@ -154,6 +161,11 @@ def compute_contact_state(u, phi, candidate_cell, x_s, X_init, penalty):
         "E": E,
         "G_u": G_u,
         "G_a": G_a,
+        "H_uphi_g": H_uphi_g,
+        "H_uu_curv": sens["H_uu_curv"],
+        "H_uu_g": H_uu_g,
+        "GF": sens["GF"],
+        "GL": sens["GL"],
         "R_uc": R_uc,
         "lam": lam,
         "kn": kn,
@@ -174,10 +186,10 @@ def main():
     )
 
     K_uphi_c, lam_uphi, kn_uphi = contact_tangent_uphi_single_point(
-        base["g_n"], base["G_u"], base["G_a"], state["penalty"]
+        base["g_n"], base["G_u"], base["G_a"], base["H_uphi_g"], state["penalty"]
     )
     K_uu_c, lam_uu, kn_uu = contact_tangent_uu_single_point(
-        base["g_n"], base["G_u"], state["penalty"]
+        base["g_n"], base["G_u"], base["H_uu_g"], state["penalty"]
     )
 
     da_vec = state["da_dir"].vector.array_r.copy()
@@ -192,6 +204,13 @@ def main():
     print(f"lambda_n = {base['lam']}")
     print(f"k_n = {base['kn']}")
     print(f"||R_u^c||_2 = {np.linalg.norm(base['R_uc'])}")
+    print(f"H_uphi_g shape = {base['H_uphi_g'].shape}")
+    print(f"H_uu_g shape = {base['H_uu_g'].shape}")
+    print(f"hess_phi available = {base['H_uu_g'] is not None}")
+    print(f"GF norm = {np.linalg.norm(base['GF'])}")
+    print(f"GL norm = {np.linalg.norm(base['GL'])}")
+    print(f"(E^T H_phi E) norm = {np.linalg.norm(base['H_uu_curv'])}")
+    print(f"H_uu_g norm = {np.linalg.norm(base['H_uu_g'])}")
     print("")
     print("K_uphi^c check:")
     print(f"||K_uphi^c * da_dir||_2 = {np.linalg.norm(lin_uphi)}")
