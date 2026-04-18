@@ -12,6 +12,7 @@ from coupled_solver.staggered import solve_staggered
 from mesh.build_mesh import create_reference_box
 from mesh import tags
 from post.xdmf import write_scalar_and_vector
+from sdf_field.assembly_tools import assemble_sdf_objects
 from sdf_field.boundary import create_sdf_bcs
 from sdf_field.diagnostics import eikonal_residual_form
 from sdf_field.forms import sdf_forms
@@ -57,6 +58,9 @@ def solve_solid_then_sdf():
     R_phi_form, K_phi_phi_form, K_phi_u_form = sdf_forms(
         u, phi, eta, phi0, sdf_cfg.beta, dx_band, dx_reg=dx
     )
+    _, _, K_phi_u_form_assembled = assemble_sdf_objects(
+        u, phi, phi0, sdf_cfg.beta, dx_band, dx_reg=dx
+    )
     phi_bcs = create_sdf_bcs(V_phi, facet_tags, tags.TOP, phi_value=0.0)
 
     sdf_info = solve_staggered(
@@ -68,6 +72,7 @@ def solve_solid_then_sdf():
             "R_phi_form": R_phi_form,
             "K_phi_phi_form": K_phi_phi_form,
             "K_phi_u_form": K_phi_u_form,
+            "K_phi_u_form_assembled": K_phi_u_form_assembled,
             "phi_bcs": phi_bcs,
         },
         solver_cfg,
