@@ -1,0 +1,5 @@
+Cutback Robustness Summary
+
+normal_no_cutback: attempts=3, accepted=3, cutbacks=0, terminated_early=False, termination_reason=completed_schedule
+cutback_recovery: attempts=26, accepted=14, cutbacks=12, terminated_early=False, termination_reason=completed_schedule
+zero_increment_first_step_failure: attempts=1, accepted=0, cutbacks=0, terminated_early=True, termination_reason=zero_increment_first_step_failed

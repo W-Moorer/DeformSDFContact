@@ -1,0 +1,61 @@
+Indenter Block Contact Summary (aggressive, Kuu=False)
+
+requested_final_target_load=0.12
+final_accepted_load=0.02
+reached_final_target=False
+terminated_early=True
+termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+accepted_step_count=13
+attempt_count=29
+total_outer_iterations_accepted=50
+total_outer_iterations_attempts=114
+cutback_count=15
+final_reaction_norm=0.026286141173663846
+final_max_penetration=0.02004867465485623
+elapsed_s=62.93558163199998
+
+Accepted steps:
+  step=1, load=0.000000, outer_iterations=2, active=8, negative_gap_sum=3.596741e-18, reaction_norm=6.348739e-18
+  step=2, load=0.005000, outer_iterations=4, active=36, negative_gap_sum=5.003104e-03, reaction_norm=6.849533e-03
+  step=2, load=0.010000, outer_iterations=4, active=36, negative_gap_sum=1.001226e-02, reaction_norm=1.351135e-02
+  step=2, load=0.012500, outer_iterations=4, active=36, negative_gap_sum=1.251903e-02, reaction_norm=1.677294e-02
+  step=2, load=0.013750, outer_iterations=4, active=36, negative_gap_sum=1.377296e-02, reaction_norm=1.838660e-02
+  step=2, load=0.015000, outer_iterations=4, active=36, negative_gap_sum=1.502723e-02, reaction_norm=1.998893e-02
+  step=2, load=0.016250, outer_iterations=4, active=36, negative_gap_sum=1.628185e-02, reaction_norm=2.157998e-02
+  step=2, load=0.016875, outer_iterations=4, active=36, negative_gap_sum=1.690930e-02, reaction_norm=2.237130e-02
+  step=2, load=0.017500, outer_iterations=4, active=36, negative_gap_sum=1.753682e-02, reaction_norm=2.315982e-02
+  step=2, load=0.018125, outer_iterations=4, active=36, negative_gap_sum=1.816443e-02, reaction_norm=2.394556e-02
+  step=2, load=0.018750, outer_iterations=4, active=36, negative_gap_sum=1.879213e-02, reaction_norm=2.472852e-02
+  step=2, load=0.019375, outer_iterations=4, active=36, negative_gap_sum=1.941991e-02, reaction_norm=2.550871e-02
+  step=2, load=0.020000, outer_iterations=4, active=36, negative_gap_sum=2.004778e-02, reaction_norm=2.628614e-02
+
+Attempts:
+  attempt=1, step=1, attempt_load=0.000000, accepted=True, cutback_level=0, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=2, step=2, attempt_load=0.040000, accepted=False, cutback_level=0, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=3, step=2, attempt_load=0.020000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=4, step=2, attempt_load=0.010000, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=5, step=2, attempt_load=0.005000, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=6, step=2, attempt_load=0.010000, accepted=True, cutback_level=2, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=7, step=2, attempt_load=0.020000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=8, step=2, attempt_load=0.015000, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=9, step=2, attempt_load=0.012500, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=10, step=2, attempt_load=0.015000, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=11, step=2, attempt_load=0.013750, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=12, step=2, attempt_load=0.015000, accepted=True, cutback_level=2, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=13, step=2, attempt_load=0.020000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=14, step=2, attempt_load=0.017500, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=15, step=2, attempt_load=0.016250, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=16, step=2, attempt_load=0.017500, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=17, step=2, attempt_load=0.016875, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=18, step=2, attempt_load=0.017500, accepted=True, cutback_level=2, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=19, step=2, attempt_load=0.020000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=20, step=2, attempt_load=0.018750, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=21, step=2, attempt_load=0.018125, accepted=True, cutback_level=3, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=22, step=2, attempt_load=0.018750, accepted=True, cutback_level=2, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=23, step=2, attempt_load=0.020000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=24, step=2, attempt_load=0.019375, accepted=True, cutback_level=2, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=25, step=2, attempt_load=0.020000, accepted=True, cutback_level=1, cutback_triggered=False, converged=True, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=26, step=2, attempt_load=0.040000, accepted=False, cutback_level=0, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=27, step=2, attempt_load=0.030000, accepted=False, cutback_level=1, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=28, step=2, attempt_load=0.025000, accepted=False, cutback_level=2, cutback_triggered=True, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+  attempt=29, step=2, attempt_load=0.022500, accepted=False, cutback_level=3, cutback_triggered=False, converged=False, termination_reason=Reached max_outer_iter without satisfying convergence tolerances

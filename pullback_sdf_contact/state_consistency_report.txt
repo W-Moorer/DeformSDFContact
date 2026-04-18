@@ -1,0 +1,27 @@
+State Consistency Report
+
+attempt_count=29
+accepted_step_count=13
+terminated_early=True
+termination_reason=Reached max_outer_iter without satisfying convergence tolerances
+final_accepted_load=0.02
+max_restore_u_diff_norm=0.0
+max_restore_phi_diff_norm=0.0
+final_u_diff_to_last_accepted_snapshot=0.0
+final_phi_diff_to_last_accepted_snapshot=0.0
+accepted_history_clean=True
+failed_attempts_not_promoted=True
+output_index_only_on_accept=True
+accepted_after_cutback_count=12
+accepted_after_cutback: step=2, accepted_attempt_state_index=5, prior_failed_attempts=3
+accepted_after_cutback: step=2, accepted_attempt_state_index=6, prior_failed_attempts=3
+accepted_after_cutback: step=2, accepted_attempt_state_index=9, prior_failed_attempts=5
+accepted_after_cutback: step=2, accepted_attempt_state_index=11, prior_failed_attempts=6
+accepted_after_cutback: step=2, accepted_attempt_state_index=12, prior_failed_attempts=6
+accepted_after_cutback: step=2, accepted_attempt_state_index=15, prior_failed_attempts=8
+accepted_after_cutback: step=2, accepted_attempt_state_index=17, prior_failed_attempts=9
+accepted_after_cutback: step=2, accepted_attempt_state_index=18, prior_failed_attempts=9
+accepted_after_cutback: step=2, accepted_attempt_state_index=21, prior_failed_attempts=11
+accepted_after_cutback: step=2, accepted_attempt_state_index=22, prior_failed_attempts=11
+accepted_after_cutback: step=2, accepted_attempt_state_index=24, prior_failed_attempts=12
+accepted_after_cutback: step=2, accepted_attempt_state_index=25, prior_failed_attempts=12

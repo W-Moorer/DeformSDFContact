@@ -1,0 +1,31 @@
+case,step,target_load,attempt_load,converged,outer_iterations,cutback_level,cutback_triggered,cutback_reason,accepted_load_before_step,load_increment
+normal_no_cutback,1,0.0,0.0,True,2,0,False,,0.0,0.0
+normal_no_cutback,2,0.01,0.01,True,4,0,False,,0.0,0.01
+normal_no_cutback,3,0.02,0.02,True,4,0,False,,0.01,0.01
+cutback_recovery,1,0.0,0.0,True,2,0,False,,0.0,0.0
+cutback_recovery,2,0.03,0.03,False,3,0,True,Reached max_outer_iter without satisfying convergence tolerances,0.0,0.03
+cutback_recovery,2,0.03,0.015,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.0,0.015
+cutback_recovery,2,0.03,0.0075,True,3,2,False,,0.0,0.0075
+cutback_recovery,2,0.03,0.015,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.0075,0.0075
+cutback_recovery,2,0.03,0.01125,True,3,2,False,,0.0075,0.00375
+cutback_recovery,2,0.03,0.015,True,3,1,False,,0.01125,0.00375
+cutback_recovery,2,0.03,0.03,False,3,0,True,Reached max_outer_iter without satisfying convergence tolerances,0.015,0.015
+cutback_recovery,2,0.03,0.0225,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.015,0.0075
+cutback_recovery,2,0.03,0.01875,False,3,2,True,Reached max_outer_iter without satisfying convergence tolerances,0.015,0.00375
+cutback_recovery,2,0.03,0.016875,True,3,3,False,,0.015,0.0018750000000000017
+cutback_recovery,2,0.03,0.01875,True,3,2,False,,0.016875,0.0018749999999999982
+cutback_recovery,2,0.03,0.0225,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.01875,0.00375
+cutback_recovery,2,0.03,0.020624999999999998,True,3,2,False,,0.01875,0.0018749999999999982
+cutback_recovery,2,0.03,0.0225,True,3,1,False,,0.020624999999999998,0.0018750000000000017
+cutback_recovery,2,0.03,0.03,False,3,0,True,Reached max_outer_iter without satisfying convergence tolerances,0.0225,0.0075
+cutback_recovery,2,0.03,0.02625,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.0225,0.00375
+cutback_recovery,2,0.03,0.024375,True,3,2,False,,0.0225,0.0018750000000000017
+cutback_recovery,2,0.03,0.02625,True,3,1,False,,0.024375,0.0018749999999999982
+cutback_recovery,2,0.03,0.03,False,3,0,True,Reached max_outer_iter without satisfying convergence tolerances,0.02625,0.00375
+cutback_recovery,2,0.03,0.028124999999999997,False,3,1,True,Reached max_outer_iter without satisfying convergence tolerances,0.02625,0.0018749999999999982
+cutback_recovery,2,0.03,0.027187499999999996,True,3,2,False,,0.02625,0.0009374999999999974
+cutback_recovery,2,0.03,0.028124999999999997,True,3,1,False,,0.027187499999999996,0.0009375000000000008
+cutback_recovery,2,0.03,0.03,False,3,0,True,Reached max_outer_iter without satisfying convergence tolerances,0.028124999999999997,0.0018750000000000017
+cutback_recovery,2,0.03,0.029062499999999998,True,3,1,False,,0.028124999999999997,0.0009375000000000008
+cutback_recovery,2,0.03,0.03,True,3,0,False,,0.029062499999999998,0.0009375000000000008
+zero_increment_first_step_failure,1,0.0,0.0,False,1,0,False,zero_increment_first_step_failed,0.0,0.0

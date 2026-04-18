@@ -7,7 +7,10 @@ import ufl
 from dolfinx import fem
 
 from config import MeshConfig, SDFConfig, SolidConfig, SolverConfig
-from coupled_solver.staggered import solve_staggered_contact_step
+from coupled_solver.staggered import (
+    recommended_staggered_contact_options,
+    solve_staggered_contact_step,
+)
 from mesh import tags
 from mesh.build_mesh import create_reference_box
 from post.xdmf import write_scalar_field
@@ -75,17 +78,27 @@ def build_contact_state():
 
 def main():
     state, solver_cfg = build_contact_state()
+    recommended = recommended_staggered_contact_options()
 
     if state["domain"].mpi_comm().rank == 0:
         print("Assembled staggered contact solve")
+        print("")
+        print(f"contact_structure_mode = {recommended['contact_structure_mode']}")
+        print(f"max_outer_iter = {recommended['max_outer_iter']}")
+        print(f"relaxation_u = {recommended['relaxation_u']}")
         print("")
 
     state, info = solve_staggered_contact_step(
         state,
         solver_cfg,
         {"step": 1, "load_value": 0.04},
-        use_contact_tangent_uu=False,
-        max_outer_iter=solver_cfg.max_it,
+        contact_structure_mode=recommended["contact_structure_mode"],
+        max_outer_iter=recommended["max_outer_iter"],
+        relaxation_u=recommended["relaxation_u"],
+        relaxation_phi=recommended["relaxation_phi"],
+        tol_du=recommended["tol_du"],
+        tol_dphi=recommended["tol_dphi"],
+        tol_contact_rhs=recommended["tol_contact_rhs"],
         verbose=solver_cfg.verbose,
     )
 

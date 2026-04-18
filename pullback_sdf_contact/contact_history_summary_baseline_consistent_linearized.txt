@@ -1,0 +1,30 @@
+Indenter Block Contact Summary (baseline, mode=consistent_linearized)
+
+contact_structure_mode=consistent_linearized
+max_outer_iter=10
+relaxation_u=1.0
+requested_final_target_load=0.06
+final_accepted_load=0.06
+reached_final_target=True
+terminated_early=False
+termination_reason=completed_schedule
+accepted_step_count=4
+attempt_count=4
+total_outer_iterations_accepted=17
+total_outer_iterations_attempts=17
+cutback_count=0
+final_reaction_norm=0.014005056884434684
+final_max_penetration=0.060030828999713466
+elapsed_s=23.118132856000003
+
+Accepted steps:
+  step=1, load=0.000000, outer_iterations=2, active=8, negative_gap_sum=3.596741e-18, reaction_norm=1.269748e-18
+  step=2, load=0.020000, outer_iterations=5, active=36, negative_gap_sum=2.000380e-02, reaction_norm=5.234785e-03
+  step=3, load=0.040000, outer_iterations=5, active=36, negative_gap_sum=4.001429e-02, reaction_norm=9.874946e-03
+  step=4, load=0.060000, outer_iterations=5, active=36, negative_gap_sum=6.003011e-02, reaction_norm=1.400506e-02
+
+Attempts:
+  attempt=1, step=1, attempt_load=0.000000, accepted=True, contact_structure_mode=consistent_linearized, cutback_level=0, cutback_triggered=False, converged=True, termination_reason=completed_schedule
+  attempt=2, step=2, attempt_load=0.020000, accepted=True, contact_structure_mode=consistent_linearized, cutback_level=0, cutback_triggered=False, converged=True, termination_reason=completed_schedule
+  attempt=3, step=3, attempt_load=0.040000, accepted=True, contact_structure_mode=consistent_linearized, cutback_level=0, cutback_triggered=False, converged=True, termination_reason=completed_schedule
+  attempt=4, step=4, attempt_load=0.060000, accepted=True, contact_structure_mode=consistent_linearized, cutback_level=0, cutback_triggered=False, converged=True, termination_reason=completed_schedule
