@@ -1,0 +1,13 @@
+Indenter Block Contact Summary
+
+step=1, load=0.000000, converged=True, outer_iterations=2, active=12, negative_gap_sum=2.216549e-18, reaction_norm=7.524968e-19
+step=2, load=0.005000, converged=True, outer_iterations=3, active=64, negative_gap_sum=5.000000e-03, reaction_norm=1.072097e-03
+step=3, load=0.010000, converged=True, outer_iterations=3, active=64, negative_gap_sum=1.000000e-02, reaction_norm=2.101814e-03
+step=4, load=0.015000, converged=True, outer_iterations=3, active=64, negative_gap_sum=1.500000e-02, reaction_norm=3.090626e-03
+step=5, load=0.020000, converged=True, outer_iterations=3, active=64, negative_gap_sum=2.000000e-02, reaction_norm=4.040129e-03
+step=6, load=0.025000, converged=True, outer_iterations=3, active=64, negative_gap_sum=2.500000e-02, reaction_norm=4.952054e-03
+step=7, load=0.030000, converged=True, outer_iterations=3, active=64, negative_gap_sum=3.000000e-02, reaction_norm=5.828267e-03
+step=8, load=0.035000, converged=True, outer_iterations=3, active=64, negative_gap_sum=3.500000e-02, reaction_norm=6.670782e-03
+step=9, load=0.040000, converged=True, outer_iterations=3, active=64, negative_gap_sum=4.000000e-02, reaction_norm=7.481771e-03
+step=10, load=0.045000, converged=True, outer_iterations=3, active=64, negative_gap_sum=4.500000e-02, reaction_norm=8.263563e-03
+step=11, load=0.050000, converged=True, outer_iterations=3, active=64, negative_gap_sum=5.000000e-02, reaction_norm=9.018660e-03
