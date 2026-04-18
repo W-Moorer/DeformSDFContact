@@ -15,7 +15,7 @@ total_outer_iterations_attempts=29
 cutback_count=0
 final_reaction_norm=0.12471645523527924
 final_max_penetration=0.12127179623496781
-elapsed_s=11.24741073200039
+elapsed_s=13.429235140000003
 
 Accepted steps:
   step=1, load=0.000000, outer_iterations=2, active=8, negative_gap_sum=3.596741e-18, reaction_norm=6.348739e-18

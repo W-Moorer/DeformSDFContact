@@ -13,6 +13,7 @@ def main():
     for mode in ("baseline", "aggressive"):
         _, _, summary = run_monolithic_case(
             mode,
+            backend=recommended["backend"],
             max_newton_iter=recommended["max_newton_iter"],
             line_search=recommended["line_search"],
             damping=recommended["initial_damping"],
@@ -21,6 +22,7 @@ def main():
         )
         row = {
             "mode": mode,
+            "backend": summary["backend"],
             "max_newton_iter": summary["max_newton_iter"],
             "line_search": summary["line_search"],
             "damping": summary["damping"],
@@ -50,12 +52,14 @@ def main():
 
     print("Monolithic baseline regression")
     print("")
+    print(f"backend = {recommended['backend']}")
     print(f"max_newton_iter = {recommended['max_newton_iter']}")
     print(f"line_search = {recommended['line_search']}")
     print(f"damping = {recommended['initial_damping']}")
     print("")
     for row in rows:
         print(f"mode = {row['mode']}")
+        print(f"  backend = {row['backend']}")
         print(f"  requested_final_target_load = {row['requested_final_target_load']}")
         print(f"  final_accepted_load = {row['final_accepted_load']}")
         print(f"  reached_final_target = {row['reached_final_target']}")

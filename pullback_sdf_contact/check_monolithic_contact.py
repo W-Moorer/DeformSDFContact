@@ -14,11 +14,12 @@ from post.xdmf import write_scalar_field
 from check_indenter_block_contact import build_indenter_state, build_load_schedule
 
 
-def summarize_monolithic_result(result, mode, max_newton_iter, line_search, damping):
+def summarize_monolithic_result(result, mode, backend, max_newton_iter, line_search, damping):
     accepted_history = result["accepted_history"]
     final_accepted = accepted_history[-1] if accepted_history else None
     return {
         "mode": mode,
+        "backend": backend,
         "line_search": bool(line_search),
         "damping": float(damping),
         "requested_final_target_load": result["requested_final_target_load"],
@@ -45,6 +46,7 @@ def summarize_monolithic_result(result, mode, max_newton_iter, line_search, damp
 def run_monolithic_case(
     mode,
     *,
+    backend=None,
     max_newton_iter=None,
     tol_res=1e-8,
     tol_inc=1e-8,
@@ -57,8 +59,9 @@ def run_monolithic_case(
 ):
     state, solver_cfg, mode_cfg = build_indenter_state(mode)
     load_schedule = build_load_schedule(mode)
-    history_path = f"monolithic_history_{mode}.csv"
+    history_path = None
     recommended = recommended_monolithic_contact_options()
+    backend = recommended["backend"] if backend is None else backend
     max_newton_iter = recommended["max_newton_iter"] if max_newton_iter is None else max_newton_iter
     line_search = recommended["line_search"] if line_search is None else bool(line_search)
     damping = recommended["initial_damping"] if damping is None else float(damping)
@@ -67,10 +70,12 @@ def run_monolithic_case(
         recommended["backtrack_factor"] if backtrack_factor is None else float(backtrack_factor)
     )
 
+    history_path = f"monolithic_history_{mode}_{backend}.csv"
     final_state, result = solve_monolithic_contact_loadpath(
         state,
         solver_cfg,
         load_schedule,
+        backend=backend,
         max_newton_iter=max_newton_iter,
         max_cutbacks=mode_cfg["max_cutbacks"],
         tol_res=tol_res,
@@ -84,7 +89,7 @@ def run_monolithic_case(
         verbose=verbose,
         min_cutback_increment=mode_cfg["min_cutback_increment"],
     )
-    summary = summarize_monolithic_result(result, mode, max_newton_iter, line_search, damping)
+    summary = summarize_monolithic_result(result, mode, backend, max_newton_iter, line_search, damping)
 
     phi_delta = final_state["phi"].vector.array_r - final_state["phi0"].vector.array_r
     summary["u_norm"] = float(np.linalg.norm(final_state["u"].vector.array_r))
@@ -92,14 +97,15 @@ def run_monolithic_case(
     summary["history_path"] = history_path
 
     if write_outputs:
-        write_scalar_field(final_state["domain"], final_state["u"], f"output_u_monolithic_{mode}.xdmf")
-        write_scalar_field(final_state["domain"], final_state["phi"], f"output_phi_monolithic_{mode}.xdmf")
+        write_scalar_field(final_state["domain"], final_state["u"], f"output_u_monolithic_{mode}_{backend}.xdmf")
+        write_scalar_field(final_state["domain"], final_state["phi"], f"output_phi_monolithic_{mode}_{backend}.xdmf")
 
     return final_state, result, summary
 
 
 def print_case(result, summary):
     print(f"mode = {summary['mode']}")
+    print(f"  backend = {summary['backend']}")
     print(f"  line_search = {summary['line_search']}")
     print(f"  damping = {summary['damping']}")
     print(f"  requested_final_target_load = {summary['requested_final_target_load']}")
@@ -130,6 +136,7 @@ def print_case(result, summary):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "aggressive", "all"], default="baseline")
+    parser.add_argument("--backend", choices=["dense", "petsc_block"], default=None)
     parser.add_argument("--max-newton-iter", type=int, default=None)
     parser.add_argument("--line-search", choices=["on", "off"], default=None)
     parser.add_argument("--damping", type=float, default=None)
@@ -143,11 +150,13 @@ def main():
     resolved_max_newton_iter = (
         recommended["max_newton_iter"] if args.max_newton_iter is None else args.max_newton_iter
     )
+    resolved_backend = recommended["backend"] if args.backend is None else args.backend
     resolved_damping = (
         recommended["initial_damping"] if args.damping is None else args.damping
     )
     print("Monolithic contact regression")
     print("")
+    print(f"backend = {resolved_backend}")
     print(f"max_newton_iter = {resolved_max_newton_iter}")
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
@@ -155,6 +164,7 @@ def main():
     for mode in modes:
         _, result, summary = run_monolithic_case(
             mode,
+            backend=resolved_backend,
             max_newton_iter=resolved_max_newton_iter,
             line_search=resolved_line_search,
             damping=resolved_damping,

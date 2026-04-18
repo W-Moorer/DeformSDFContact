@@ -9,10 +9,10 @@ from coupled_solver.monolithic import recommended_monolithic_contact_options
 from coupled_solver.staggered import recommended_staggered_contact_options
 
 
-def print_comparison(mode, staggered_summary, monolithic_summary):
+def print_comparison(mode, staggered_summary, dense_summary, sparse_summary):
     print(f"mode = {mode}")
     print(
-        "  solver      | converged | requested_target | final_accepted | total_iterations | "
+        "  solver           | converged | requested_target | final_accepted | total_iterations | "
         "cutbacks | final_reaction_norm | final_max_penetration | ||u||_2 | ||phi-phi0||_2"
     )
     print(
@@ -30,17 +30,31 @@ def print_comparison(mode, staggered_summary, monolithic_summary):
         )
     )
     print(
-        "  monolithic  | {conv} | {target:.6f} | {accepted:.6f} | {iters} | {cutbacks} | "
+        "  mono-dense       | {conv} | {target:.6f} | {accepted:.6f} | {iters} | {cutbacks} | "
         "{reaction:.6e} | {penetration:.6e} | {u_norm:.6e} | {phi_norm:.6e}".format(
-            conv=monolithic_summary["reached_final_target"],
-            target=monolithic_summary["requested_final_target_load"],
-            accepted=monolithic_summary["final_accepted_load"],
-            iters=monolithic_summary["total_newton_iterations_accepted"],
-            cutbacks=monolithic_summary["cutback_count"],
-            reaction=monolithic_summary["final_reaction_norm"],
-            penetration=monolithic_summary["final_max_penetration"],
-            u_norm=monolithic_summary["u_norm"],
-            phi_norm=monolithic_summary["phi_delta_norm"],
+            conv=dense_summary["reached_final_target"],
+            target=dense_summary["requested_final_target_load"],
+            accepted=dense_summary["final_accepted_load"],
+            iters=dense_summary["total_newton_iterations_accepted"],
+            cutbacks=dense_summary["cutback_count"],
+            reaction=dense_summary["final_reaction_norm"],
+            penetration=dense_summary["final_max_penetration"],
+            u_norm=dense_summary["u_norm"],
+            phi_norm=dense_summary["phi_delta_norm"],
+        )
+    )
+    print(
+        "  mono-petsc       | {conv} | {target:.6f} | {accepted:.6f} | {iters} | {cutbacks} | "
+        "{reaction:.6e} | {penetration:.6e} | {u_norm:.6e} | {phi_norm:.6e}".format(
+            conv=sparse_summary["reached_final_target"],
+            target=sparse_summary["requested_final_target_load"],
+            accepted=sparse_summary["final_accepted_load"],
+            iters=sparse_summary["total_newton_iterations_accepted"],
+            cutbacks=sparse_summary["cutback_count"],
+            reaction=sparse_summary["final_reaction_norm"],
+            penetration=sparse_summary["final_max_penetration"],
+            u_norm=sparse_summary["u_norm"],
+            phi_norm=sparse_summary["phi_delta_norm"],
         )
     )
 
@@ -82,6 +96,16 @@ def main():
         staggered_state, _, staggered_summary, _, _ = run_staggered_case(mode)
         monolithic_state, _, monolithic_summary = run_monolithic_case(
             mode,
+            backend="dense",
+            max_newton_iter=resolved_max_newton_iter,
+            line_search=resolved_line_search,
+            damping=resolved_damping,
+            write_outputs=False,
+            verbose=False,
+        )
+        sparse_state, _, sparse_summary = run_monolithic_case(
+            mode,
+            backend="petsc_block",
             max_newton_iter=resolved_max_newton_iter,
             line_search=resolved_line_search,
             damping=resolved_damping,
@@ -92,7 +116,7 @@ def main():
         staggered_summary["phi_delta_norm"] = float(
             ((staggered_state["phi"].vector.array_r - staggered_state["phi0"].vector.array_r) ** 2).sum() ** 0.5
         )
-        print_comparison(mode, staggered_summary, monolithic_summary)
+        print_comparison(mode, staggered_summary, monolithic_summary, sparse_summary)
         print("")
 
 
