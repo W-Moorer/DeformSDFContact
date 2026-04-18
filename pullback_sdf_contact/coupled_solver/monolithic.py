@@ -7,6 +7,29 @@ from petsc4py import PETSc
 from contact_mechanics.assembled_surface import assemble_contact_contributions_surface
 from solid.solve import _owned_bc_dofs, assemble_linear_solid_system, dense_array_from_petsc_mat
 
+RECOMMENDED_MONOLITHIC_MAX_NEWTON_ITER = 20
+RECOMMENDED_MONOLITHIC_LINE_SEARCH = True
+RECOMMENDED_MONOLITHIC_INITIAL_DAMPING = 1.0
+RECOMMENDED_MONOLITHIC_MAX_BACKTRACKS = 8
+RECOMMENDED_MONOLITHIC_BACKTRACK_FACTOR = 0.5
+RECOMMENDED_MONOLITHIC_TOL_RES = 1e-8
+RECOMMENDED_MONOLITHIC_TOL_INC = 1e-8
+
+
+def recommended_monolithic_contact_options(**overrides):
+    """Return the current project-recommended dense monolithic settings."""
+    options = {
+        "max_newton_iter": RECOMMENDED_MONOLITHIC_MAX_NEWTON_ITER,
+        "line_search": RECOMMENDED_MONOLITHIC_LINE_SEARCH,
+        "initial_damping": RECOMMENDED_MONOLITHIC_INITIAL_DAMPING,
+        "max_backtracks": RECOMMENDED_MONOLITHIC_MAX_BACKTRACKS,
+        "backtrack_factor": RECOMMENDED_MONOLITHIC_BACKTRACK_FACTOR,
+        "tol_res": RECOMMENDED_MONOLITHIC_TOL_RES,
+        "tol_inc": RECOMMENDED_MONOLITHIC_TOL_INC,
+    }
+    options.update(overrides)
+    return options
+
 
 def _compile_form(expr):
     if hasattr(fem, "form") and callable(fem.form):
@@ -94,6 +117,7 @@ def _write_history_csv(history, history_path):
         "max_penetration",
         "reaction_norm",
         "cutback_level",
+        "step_length",
         "cutback_triggered",
         "cutback_reason",
         "terminated_early",
@@ -231,6 +255,66 @@ def _build_monolithic_dense_system(state, assembled):
     return J, residual
 
 
+def _evaluate_total_residual_norm(state, cfg):
+    assembled = assemble_monolithic_contact_system(state, cfg, need_jacobian=False)
+    residual = np.concatenate([assembled["R_u_total"], assembled["R_phi_total"]])
+    return float(np.linalg.norm(residual)), assembled
+
+
+def _backtracking_line_search(
+    state,
+    cfg,
+    delta_u,
+    delta_phi,
+    residual_norm_before,
+    *,
+    initial_damping=1.0,
+    max_backtracks=8,
+    backtrack_factor=0.5,
+):
+    snapshot = _snapshot_state_fields(state)
+    alpha = float(initial_damping)
+    best = None
+
+    for _ in range(max_backtracks + 1):
+        _restore_state_fields(state, snapshot)
+        _apply_state_increment(state, delta_u, delta_phi, scale=alpha)
+        residual_after, assembled_after = _evaluate_total_residual_norm(state, cfg)
+        candidate = (alpha, residual_after, assembled_after)
+        if best is None or residual_after < best[1]:
+            best = candidate
+        if residual_after < residual_norm_before:
+            return {
+                "accepted": True,
+                "step_length": alpha,
+                "residual_after": residual_after,
+                "assembled_after": assembled_after,
+                "used_fallback": False,
+            }
+        alpha *= float(backtrack_factor)
+
+    _restore_state_fields(state, snapshot)
+    if best is None:
+        return {
+            "accepted": False,
+            "step_length": 0.0,
+            "residual_after": residual_norm_before,
+            "assembled_after": None,
+            "used_fallback": False,
+        }
+
+    # Fallback: keep the best damped trial even if it does not strictly reduce the residual.
+    alpha_best, residual_best, assembled_best = best
+    _apply_state_increment(state, delta_u, delta_phi, scale=alpha_best)
+    return {
+        "accepted": True,
+        "step_length": alpha_best,
+        "residual_after": residual_best,
+        "assembled_after": assembled_best,
+        "used_fallback": True,
+    }
+
+
 def solve_monolithic_contact(
     state,
     cfg,
@@ -239,6 +323,9 @@ def solve_monolithic_contact(
     tol_res=1e-8,
     tol_inc=1e-8,
     line_search=False,
+    initial_damping=1.0,
+    max_backtracks=8,
+    backtrack_factor=0.5,
     verbose=True,
 ):
     """Solve one fixed-load monolithic contact state by dense Newton."""
@@ -276,59 +363,70 @@ def solve_monolithic_contact(
         delta_phi = delta[ndof_u:]
         increment_norm = float(np.linalg.norm(delta))
 
+        used_fallback = False
         if line_search:
-            alpha = 1.0
-            snapshot = _snapshot_state_fields(state)
-            accepted = False
-            while alpha >= 1.0 / 64.0:
-                _restore_state_fields(state, snapshot)
-                _apply_state_increment(state, delta_u, delta_phi, scale=alpha)
-                trial = assemble_monolithic_contact_system(state, cfg, need_jacobian=False)
-                trial_residual = np.concatenate([trial["R_u_total"], trial["R_phi_total"]])
-                trial_residual_norm = float(np.linalg.norm(trial_residual))
-                if trial_residual_norm < residual_norm:
-                    accepted = True
-                    residual_after = trial_residual_norm
-                    break
-                alpha *= 0.5
-            if not accepted:
-                _restore_state_fields(state, snapshot)
-                failure_reason = "line search failed to reduce residual"
+            line_search_out = _backtracking_line_search(
+                state,
+                cfg,
+                delta_u,
+                delta_phi,
+                residual_norm,
+                initial_damping=initial_damping,
+                max_backtracks=max_backtracks,
+                backtrack_factor=backtrack_factor,
+            )
+            if not line_search_out["accepted"]:
+                failure_reason = "line search failed to produce a trial step"
                 break
+            step_length = float(line_search_out["step_length"])
+            residual_after = float(line_search_out["residual_after"])
+            assembled_after = line_search_out["assembled_after"]
+            used_fallback = bool(line_search_out["used_fallback"])
         else:
             _apply_state_increment(state, delta_u, delta_phi, scale=1.0)
-            residual_after = None
+            step_length = 1.0
+            residual_after, assembled_after = _evaluate_total_residual_norm(state, cfg)
 
         row = {
             "newton_iteration": newton_it,
-            "residual_norm": residual_norm,
+            "residual_norm_before": residual_norm,
+            "residual_norm_after": residual_after,
+            "residual_norm": residual_after,
             "increment_norm": increment_norm,
             "active_contact_points": assembled["diagnostics"]["active_contact_points"],
             "negative_gap_sum": assembled["diagnostics"]["negative_gap_sum"],
             "reaction_norm": assembled["diagnostics"]["reaction_norm"],
             "max_penetration": assembled["diagnostics"]["max_penetration"],
-            "residual_after": residual_after,
+            "active_contact_points_after": assembled_after["diagnostics"]["active_contact_points"],
+            "negative_gap_sum_after": assembled_after["diagnostics"]["negative_gap_sum"],
+            "reaction_norm_after": assembled_after["diagnostics"]["reaction_norm"],
+            "max_penetration_after": assembled_after["diagnostics"]["max_penetration"],
+            "step_length": step_length,
+            "used_fallback": used_fallback,
         }
         history.append(row)
 
         if verbose and rank0:
             print(
                 f"Newton iter {newton_it}: "
-                f"||R||={residual_norm:.6e}, ||d||={increment_norm:.6e}, "
-                f"active={row['active_contact_points']}, gap_sum={row['negative_gap_sum']:.6e}"
+                f"||R||={residual_norm:.6e} -> {residual_after:.6e}, "
+                f"||d||={increment_norm:.6e}, alpha={step_length:.3f}, "
+                f"active={row['active_contact_points_after']}, "
+                f"gap_sum={row['negative_gap_sum_after']:.6e}"
             )
 
-        if increment_norm < tol_inc:
+        if residual_after < tol_res or increment_norm * step_length < tol_inc:
             info = {
                 "newton_iterations": newton_it,
                 "converged": True,
                 "failure_reason": "",
-                "residual_norm": residual_norm,
-                "increment_norm": increment_norm,
-                "active_contact_points": row["active_contact_points"],
-                "negative_gap_sum": row["negative_gap_sum"],
-                "reaction_norm": row["reaction_norm"],
-                "max_penetration": row["max_penetration"],
+                "residual_norm": residual_after,
+                "increment_norm": increment_norm * step_length,
+                "active_contact_points": row["active_contact_points_after"],
+                "negative_gap_sum": row["negative_gap_sum_after"],
+                "reaction_norm": row["reaction_norm_after"],
+                "max_penetration": row["max_penetration_after"],
+                "step_length": step_length,
                 "history": history,
             }
             return state, info
@@ -350,10 +448,11 @@ def solve_monolithic_contact(
         "failure_reason": failure_reason,
         "residual_norm": last["residual_norm"],
         "increment_norm": last["increment_norm"],
-        "active_contact_points": last["active_contact_points"],
-        "negative_gap_sum": last["negative_gap_sum"],
-        "reaction_norm": last["reaction_norm"],
-        "max_penetration": last["max_penetration"],
+        "active_contact_points": last.get("active_contact_points_after", last["active_contact_points"]),
+        "negative_gap_sum": last.get("negative_gap_sum_after", last["negative_gap_sum"]),
+        "reaction_norm": last.get("reaction_norm_after", last["reaction_norm"]),
+        "max_penetration": last.get("max_penetration_after", last["max_penetration"]),
+        "step_length": last.get("step_length", 0.0),
         "history": history,
     }
     return state, info
@@ -369,6 +468,9 @@ def solve_monolithic_contact_loadpath(
     tol_res=1e-8,
     tol_inc=1e-8,
     line_search=False,
+    initial_damping=1.0,
+    max_backtracks=8,
+    backtrack_factor=0.5,
     write_outputs=True,
     history_path=None,
     verbose=True,
@@ -425,6 +527,9 @@ def solve_monolithic_contact_loadpath(
             tol_res=tol_res,
             tol_inc=tol_inc,
             line_search=line_search,
+            initial_damping=initial_damping,
+            max_backtracks=max_backtracks,
+            backtrack_factor=backtrack_factor,
             verbose=verbose,
         )
 
@@ -446,6 +551,7 @@ def solve_monolithic_contact_loadpath(
             "negative_gap_sum": float(step_info["negative_gap_sum"]),
             "reaction_norm": float(step_info["reaction_norm"]),
             "max_penetration": float(step_info["max_penetration"]),
+            "step_length": float(step_info.get("step_length", 0.0)),
             "cutback_level": int(step_data.get("cutback_level", 0)),
             "cutback_triggered": False,
             "cutback_reason": "",
