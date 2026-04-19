@@ -36,10 +36,47 @@ def summarize_monolithic_result(
     resolved_block_pc_name = (
         block_pc_name if final_accepted is None else final_accepted.get("block_pc_name", block_pc_name)
     )
+    total_newton_iterations_accepted = int(
+        sum(item["newton_iterations"] for item in accepted_history)
+    )
+    total_newton_iterations_attempts = int(
+        sum(item["newton_iterations"] for item in result["attempt_history"])
+    )
+    total_linear_iterations_accepted = int(
+        sum(item.get("linear_iterations", 0) for item in accepted_history)
+    )
+    total_linear_iterations_attempts = int(
+        sum(item.get("linear_iterations", 0) for item in result["attempt_history"])
+    )
+    per_newton_linear_iterations = []
+    per_newton_ksp_reasons = []
+    per_newton_outer_residual_before = []
+    per_newton_outer_residual_after = []
+    per_newton_relative_reduction = []
+    for item in accepted_history:
+        per_newton_linear_iterations.extend(item.get("linear_iterations_list", []))
+        per_newton_ksp_reasons.extend(item.get("ksp_reason_list", []))
+        per_newton_outer_residual_before.extend(
+            item.get("outer_residual_norm_before_linear_list", [])
+        )
+        per_newton_outer_residual_after.extend(
+            item.get("outer_residual_norm_after_linear_list", [])
+        )
+        per_newton_relative_reduction.extend(
+            item.get("relative_linear_reduction_list", [])
+        )
+    ksp_reason_list = [int(item.get("ksp_reason", 0)) for item in accepted_history]
+    ksp_reason_histogram = {}
+    for reason in ksp_reason_list:
+        key = str(reason)
+        ksp_reason_histogram[key] = ksp_reason_histogram.get(key, 0) + 1
     return {
         "mode": mode,
         "backend": backend,
         "mesh_resolution": result.get("mesh_resolution", ""),
+        "ndof_u": int(result.get("ndof_u", 0)),
+        "ndof_phi": int(result.get("ndof_phi", 0)),
+        "total_dofs": int(result.get("ndof_u", 0) + result.get("ndof_phi", 0)),
         "line_search": bool(line_search),
         "damping": float(damping),
         "requested_final_target_load": result["requested_final_target_load"],
@@ -49,27 +86,31 @@ def summarize_monolithic_result(
         "termination_reason": result["termination_reason"],
         "accepted_step_count": result["accepted_step_count"],
         "attempt_count": result["attempt_count"],
-        "total_newton_iterations_accepted": int(
-            sum(item["newton_iterations"] for item in accepted_history)
-        ),
-        "total_newton_iterations_attempts": int(
-            sum(item["newton_iterations"] for item in result["attempt_history"])
-        ),
+        "total_newton_iterations_accepted": total_newton_iterations_accepted,
+        "total_newton_iterations_attempts": total_newton_iterations_attempts,
         "cutback_count": int(sum(1 for item in result["attempt_history"] if item["cutback_triggered"])),
         "linear_solver_mode": resolved_linear_solver_mode,
         "ksp_type": resolved_ksp_type,
         "pc_type": resolved_pc_type,
         "block_pc_name": resolved_block_pc_name,
-        "total_linear_iterations_accepted": int(
-            sum(item.get("linear_iterations", 0) for item in accepted_history)
-        ),
-        "total_linear_iterations_attempts": int(
-            sum(item.get("linear_iterations", 0) for item in result["attempt_history"])
+        "total_linear_iterations_accepted": total_linear_iterations_accepted,
+        "total_linear_iterations_attempts": total_linear_iterations_attempts,
+        "avg_linear_iterations_per_newton": (
+            0.0
+            if total_newton_iterations_accepted == 0
+            else total_linear_iterations_accepted / total_newton_iterations_accepted
         ),
         "final_residual_norm": 0.0 if final_accepted is None else float(final_accepted["residual_norm"]),
         "final_reaction_norm": 0.0 if final_accepted is None else float(final_accepted["reaction_norm"]),
         "final_max_penetration": 0.0 if final_accepted is None else float(final_accepted["max_penetration"]),
         "max_newton_iter": max_newton_iter,
+        "ksp_reason_list": ksp_reason_list,
+        "ksp_reason_histogram": ksp_reason_histogram,
+        "per_newton_linear_iterations": per_newton_linear_iterations,
+        "per_newton_ksp_reasons": per_newton_ksp_reasons,
+        "per_newton_outer_residual_before": per_newton_outer_residual_before,
+        "per_newton_outer_residual_after": per_newton_outer_residual_after,
+        "per_newton_relative_reduction": per_newton_relative_reduction,
     }
 
 
@@ -196,6 +237,9 @@ def run_monolithic_case(
 def print_case(result, summary):
     print(f"mode = {summary['mode']}")
     print(f"  mesh_resolution = {summary['mesh_resolution']}")
+    print(f"  ndof_u = {summary['ndof_u']}")
+    print(f"  ndof_phi = {summary['ndof_phi']}")
+    print(f"  total_dofs = {summary['total_dofs']}")
     print(f"  backend = {summary['backend']}")
     print(f"  linear_solver_mode = {summary['linear_solver_mode']}")
     print(f"  ksp_type = {summary['ksp_type']}")
@@ -214,26 +258,37 @@ def print_case(result, summary):
     print(f"  total_newton_iterations_attempts = {summary['total_newton_iterations_attempts']}")
     print(f"  total_linear_iterations_accepted = {summary['total_linear_iterations_accepted']}")
     print(f"  total_linear_iterations_attempts = {summary['total_linear_iterations_attempts']}")
+    print(f"  avg_linear_iterations_per_newton = {summary['avg_linear_iterations_per_newton']}")
     print(f"  cutback_count = {summary['cutback_count']}")
     print(f"  final_residual_norm = {summary['final_residual_norm']}")
     print(f"  final_reaction_norm = {summary['final_reaction_norm']}")
     print(f"  final_max_penetration = {summary['final_max_penetration']}")
     print(f"  ||u||_2 = {summary['u_norm']}")
     print(f"  ||phi - phi0||_2 = {summary['phi_delta_norm']}")
+    print(f"  ksp_reason_list = {summary['ksp_reason_list']}")
+    print(f"  ksp_reason_histogram = {summary['ksp_reason_histogram']}")
+    print(f"  per_newton_linear_iterations = {summary['per_newton_linear_iterations']}")
+    print(f"  per_newton_ksp_reasons = {summary['per_newton_ksp_reasons']}")
+    print(f"  per_newton_outer_residual_before = {summary['per_newton_outer_residual_before']}")
+    print(f"  per_newton_outer_residual_after = {summary['per_newton_outer_residual_after']}")
+    print(f"  per_newton_relative_reduction = {summary['per_newton_relative_reduction']}")
+    print(f"  history_path = {summary['history_path']}")
     print("  accepted steps:")
     for item in result["accepted_history"]:
         print(
             "    state={accepted_state_index:02d} step={step:02d} load={load_value:.4f} "
             "newton_iterations={newton_iterations} residual_norm={residual_norm:.6e} "
             "reaction_norm={reaction_norm:.6e} active={active_contact_points} "
-            "linear_iterations={linear_iterations} step_length={step_length:.3f}".format(**item)
+            "linear_iterations={linear_iterations} linear_iterations_list={linear_iterations_list} "
+            "ksp_reason_list={ksp_reason_list} reduction_list={relative_linear_reduction_list} "
+            "step_length={step_length:.3f}".format(**item)
         )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "aggressive", "all"], default="baseline")
-    parser.add_argument("--mesh-scale", choices=["small", "larger"], default="small")
+    parser.add_argument("--mesh-scale", choices=["small", "larger", "xlarger"], default="small")
     parser.add_argument("--nx", type=int, default=None)
     parser.add_argument("--ny", type=int, default=None)
     parser.add_argument("--nz", type=int, default=None)

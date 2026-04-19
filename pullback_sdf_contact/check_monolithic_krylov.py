@@ -4,13 +4,17 @@ import os
 os.environ.setdefault("HWLOC_COMPONENTS", "-gl,-opencl,-cuda")
 
 from check_monolithic_contact import print_case, run_monolithic_case
-from coupled_solver.monolithic import recommended_monolithic_contact_options
+from coupled_solver.monolithic import (
+    get_petsc_runtime_info,
+    monolithic_block_pc_names,
+    recommended_monolithic_contact_options,
+)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "aggressive", "all"], default="baseline")
-    parser.add_argument("--mesh-scale", choices=["small", "larger"], default="small")
+    parser.add_argument("--mesh-scale", choices=["small", "larger", "xlarger"], default="small")
     parser.add_argument("--nx", type=int, default=None)
     parser.add_argument("--ny", type=int, default=None)
     parser.add_argument("--nz", type=int, default=None)
@@ -27,6 +31,7 @@ def main():
     args = parser.parse_args()
 
     recommended = recommended_monolithic_contact_options()
+    runtime = get_petsc_runtime_info()
     modes = ["baseline", "aggressive"] if args.mode == "all" else [args.mode]
     resolved_max_newton_iter = (
         recommended["max_newton_iter"] if args.max_newton_iter is None else args.max_newton_iter
@@ -56,6 +61,8 @@ def main():
 
     print("Monolithic Krylov/LU benchmark")
     print("")
+    print(f"petsc_version = {runtime['petsc_version']}")
+    print(f"available_block_pc_names = {monolithic_block_pc_names()}")
     print(f"mesh_scale = {args.mesh_scale}")
     if args.nx is not None or args.ny is not None or args.nz is not None:
         print(f"mesh_override = ({args.nx}, {args.ny}, {args.nz})")

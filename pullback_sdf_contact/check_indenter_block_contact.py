@@ -30,6 +30,8 @@ def get_mode_config(mode, mesh_scale="small", nx=None, ny=None, nz=None):
         default_nx, default_ny, default_nz = 3, 3, 3
     elif mesh_scale == "larger":
         default_nx, default_ny, default_nz = 4, 4, 4
+    elif mesh_scale == "xlarger":
+        default_nx, default_ny, default_nz = 5, 5, 5
     else:
         raise ValueError(f"Unsupported mesh_scale: {mesh_scale}")
     if nx is not None:

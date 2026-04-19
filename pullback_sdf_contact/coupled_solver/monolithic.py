@@ -23,6 +23,33 @@ RECOMMENDED_MONOLITHIC_KSP_RTOL = 1e-10
 RECOMMENDED_MONOLITHIC_KSP_ATOL = 1e-12
 RECOMMENDED_MONOLITHIC_KSP_MAX_IT = 400
 
+BLOCK_PC_CONFIGS = {
+    "fieldsplit_additive_ilu": {
+        "split_type": "ADDITIVE",
+        "sub_pc_type": "ilu",
+    },
+    "fieldsplit_multiplicative_ilu": {
+        "split_type": "MULTIPLICATIVE",
+        "sub_pc_type": "ilu",
+    },
+    "fieldsplit_symmetric_multiplicative_ilu": {
+        "split_type": "SYMMETRIC_MULTIPLICATIVE",
+        "sub_pc_type": "ilu",
+    },
+    "fieldsplit_schur_lower_selfp_ilu": {
+        "split_type": "SCHUR",
+        "schur_fact_type": "LOWER",
+        "schur_pre_type": "SELFP",
+        "sub_pc_type": "ilu",
+    },
+    "fieldsplit_schur_upper_selfp_ilu": {
+        "split_type": "SCHUR",
+        "schur_fact_type": "UPPER",
+        "schur_pre_type": "SELFP",
+        "sub_pc_type": "ilu",
+    },
+}
+
 
 def recommended_monolithic_contact_options(**overrides):
     """Return the current project-recommended monolithic settings."""
@@ -45,6 +72,38 @@ def recommended_monolithic_contact_options(**overrides):
     }
     options.update(overrides)
     return options
+
+
+def monolithic_block_pc_names():
+    return sorted(BLOCK_PC_CONFIGS.keys())
+
+
+def get_petsc_runtime_info():
+    """Return runtime PETSc metadata and currently configured block-PC names."""
+    version = PETSc.Sys.getVersion()
+    return {
+        "petsc_version": ".".join(str(part) for part in version),
+        "block_pc_names": monolithic_block_pc_names(),
+    }
+
+
+def _safe_enum_lookup(enum_cls, name, *, feature_name):
+    if hasattr(enum_cls, name):
+        return getattr(enum_cls, name)
+    raise RuntimeError(
+        f"PETSc runtime does not expose {feature_name}='{name}' for {enum_cls.__name__}"
+    )
+
+
+def _state_dof_layout(state):
+    ndof_u = state["u"].vector.getLocalSize()
+    ndof_phi = state["phi"].vector.getLocalSize()
+    return {
+        "ndof_u": int(ndof_u),
+        "ndof_phi": int(ndof_phi),
+        "total_dofs": int(ndof_u + ndof_phi),
+        "mesh_resolution": state.get("mesh_resolution", ""),
+    }
 
 
 def _compile_form(expr):
@@ -133,6 +192,9 @@ def _write_history_csv(history, history_path):
         "linear_converged",
         "linear_iterations",
         "ksp_reason",
+        "outer_residual_norm_before_linear",
+        "outer_residual_norm_after_linear",
+        "relative_linear_reduction",
         "newton_iterations",
         "residual_norm",
         "increment_norm",
@@ -140,6 +202,14 @@ def _write_history_csv(history, history_path):
         "negative_gap_sum",
         "max_penetration",
         "reaction_norm",
+        "mesh_resolution",
+        "ndof_u",
+        "ndof_phi",
+        "linear_iterations_list",
+        "ksp_reason_list",
+        "outer_residual_norm_before_linear_list",
+        "outer_residual_norm_after_linear_list",
+        "relative_linear_reduction_list",
         "cutback_level",
         "step_length",
         "cutback_triggered",
@@ -156,6 +226,26 @@ def _write_history_csv(history, history_path):
         writer.writeheader()
         for item in history:
             row = {key: item.get(key, "") for key in fieldnames}
+            if isinstance(row.get("linear_iterations_list"), list):
+                row["linear_iterations_list"] = "|".join(
+                    str(value) for value in row["linear_iterations_list"]
+                )
+            if isinstance(row.get("ksp_reason_list"), list):
+                row["ksp_reason_list"] = "|".join(
+                    str(value) for value in row["ksp_reason_list"]
+                )
+            if isinstance(row.get("outer_residual_norm_before_linear_list"), list):
+                row["outer_residual_norm_before_linear_list"] = "|".join(
+                    f"{value:.16e}" for value in row["outer_residual_norm_before_linear_list"]
+                )
+            if isinstance(row.get("outer_residual_norm_after_linear_list"), list):
+                row["outer_residual_norm_after_linear_list"] = "|".join(
+                    f"{value:.16e}" for value in row["outer_residual_norm_after_linear_list"]
+                )
+            if isinstance(row.get("relative_linear_reduction_list"), list):
+                row["relative_linear_reduction_list"] = "|".join(
+                    f"{value:.16e}" for value in row["relative_linear_reduction_list"]
+                )
             writer.writerow(row)
 
 
@@ -225,16 +315,39 @@ def _create_petsc_aij_from_dense(matrix, comm):
 
 
 def _configure_ksp_for_fieldsplit(solver, A, ndof_u, ndof_phi, *, block_pc_name):
+    if block_pc_name not in BLOCK_PC_CONFIGS:
+        raise ValueError(
+            f"Unsupported block_pc_name: {block_pc_name}. "
+            f"Expected one of {sorted(BLOCK_PC_CONFIGS)}."
+        )
+    block_cfg = BLOCK_PC_CONFIGS[block_pc_name]
     pc = solver.getPC()
     pc.setType(PETSc.PC.Type.FIELDSPLIT)
-    if block_pc_name.startswith("fieldsplit_additive_"):
-        pc.setFieldSplitType(PETSc.PC.CompositeType.ADDITIVE)
-    elif block_pc_name.startswith("fieldsplit_multiplicative_"):
-        pc.setFieldSplitType(PETSc.PC.CompositeType.MULTIPLICATIVE)
-    elif block_pc_name.startswith("fieldsplit_symmetric_multiplicative_"):
-        pc.setFieldSplitType(PETSc.PC.CompositeType.SYMMETRIC_MULTIPLICATIVE)
+    split_type = block_cfg["split_type"]
+    if split_type == "SCHUR":
+        pc.setFieldSplitType(PETSc.PC.CompositeType.SCHUR)
+        pc.setFieldSplitSchurFactType(
+            _safe_enum_lookup(
+                PETSc.PC.SchurFactType,
+                block_cfg["schur_fact_type"],
+                feature_name="schur_fact_type",
+            )
+        )
+        pc.setFieldSplitSchurPreType(
+            _safe_enum_lookup(
+                PETSc.PC.SchurPreType,
+                block_cfg["schur_pre_type"],
+                feature_name="schur_pre_type",
+            )
+        )
     else:
-        raise ValueError(f"Unsupported block_pc_name: {block_pc_name}")
+        pc.setFieldSplitType(
+            _safe_enum_lookup(
+                PETSc.PC.CompositeType,
+                split_type,
+                feature_name="fieldsplit composite type",
+            )
+        )
     comm = A.getComm()
     u_is = PETSc.IS().createGeneral(np.arange(ndof_u, dtype=np.int32), comm=comm)
     phi_is = PETSc.IS().createGeneral(
@@ -245,25 +358,9 @@ def _configure_ksp_for_fieldsplit(solver, A, ndof_u, ndof_phi, *, block_pc_name)
     subksps = pc.getFieldSplitSubKSP()
     if len(subksps) != 2:
         raise RuntimeError(f"Expected 2 fieldsplit sub-KSPs, got {len(subksps)}")
-
-    if block_pc_name in {
-        "fieldsplit_additive_ilu",
-        "fieldsplit_multiplicative_ilu",
-        "fieldsplit_symmetric_multiplicative_ilu",
-    }:
-        for sub in subksps:
-            sub.setType("preonly")
-            sub.getPC().setType("ilu")
-    elif block_pc_name in {
-        "fieldsplit_additive_lu",
-        "fieldsplit_multiplicative_lu",
-        "fieldsplit_symmetric_multiplicative_lu",
-    }:
-        for sub in subksps:
-            sub.setType("preonly")
-            sub.getPC().setType("lu")
-    else:
-        raise ValueError(f"Unsupported block_pc_name: {block_pc_name}")
+    for sub in subksps:
+        sub.setType("preonly")
+        sub.getPC().setType(block_cfg["sub_pc_type"])
 
     return subksps
 
@@ -362,6 +459,7 @@ def _assemble_global_backend_objects(state, assembled, backend):
 
 def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jacobian=True):
     """Assemble the monolithic block residual and Jacobian."""
+    dof_layout = _state_dof_layout(state)
     A_struct, b_struct, solid_meta = assemble_linear_solid_system(
         state["u"],
         state["R_u_form"],
@@ -399,6 +497,7 @@ def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jaco
         "point_data": contact["point_data"],
         "u_constrained_dofs": _owned_bc_dofs(state["solid_bcs"]),
         "phi_constrained_dofs": _owned_bc_dofs(state["phi_bcs"]),
+        **dof_layout,
     }
 
     if need_jacobian:
@@ -507,6 +606,7 @@ def solve_monolithic_contact(
 ):
     """Solve one fixed-load monolithic contact state."""
     rank0 = state["domain"].mpi_comm().rank == 0
+    dof_layout = _state_dof_layout(state)
     history = []
     failure_reason = ""
 
@@ -536,6 +636,10 @@ def solve_monolithic_contact(
                 "reaction_norm": assembled["diagnostics"]["reaction_norm"],
                 "max_penetration": assembled["diagnostics"]["max_penetration"],
                 "step_length": 0.0,
+                "outer_residual_norm_before_linear": 0.0,
+                "outer_residual_norm_after_linear": residual_norm,
+                "relative_linear_reduction": 0.0,
+                **dof_layout,
                 "history": history,
             }
             return state, info
@@ -613,9 +717,17 @@ def solve_monolithic_contact(
 
         row = {
             "newton_iteration": newton_it,
+            "mesh_resolution": dof_layout["mesh_resolution"],
+            "ndof_u": dof_layout["ndof_u"],
+            "ndof_phi": dof_layout["ndof_phi"],
             "residual_norm_before": residual_norm,
             "residual_norm_after": residual_after,
             "residual_norm": residual_after,
+            "outer_residual_norm_before_linear": residual_norm,
+            "outer_residual_norm_after_linear": residual_after,
+            "relative_linear_reduction": (
+                0.0 if residual_norm <= 0.0 else float(residual_after / residual_norm)
+            ),
             "increment_norm": increment_norm,
             "active_contact_points": assembled["diagnostics"]["active_contact_points"],
             "negative_gap_sum": assembled["diagnostics"]["negative_gap_sum"],
@@ -670,6 +782,10 @@ def solve_monolithic_contact(
                 "reaction_norm": row["reaction_norm_after"],
                 "max_penetration": row["max_penetration_after"],
                 "step_length": step_length,
+                "outer_residual_norm_before_linear": row["outer_residual_norm_before_linear"],
+                "outer_residual_norm_after_linear": row["outer_residual_norm_after_linear"],
+                "relative_linear_reduction": row["relative_linear_reduction"],
+                **dof_layout,
                 "history": history,
             }
             return state, info
@@ -714,6 +830,10 @@ def solve_monolithic_contact(
         "reaction_norm": last["reaction_norm_after"],
         "max_penetration": last["max_penetration_after"],
         "step_length": last["step_length"],
+        "outer_residual_norm_before_linear": last.get("outer_residual_norm_before_linear", np.inf),
+        "outer_residual_norm_after_linear": last.get("outer_residual_norm_after_linear", np.inf),
+        "relative_linear_reduction": last.get("relative_linear_reduction", np.inf),
+        **dof_layout,
         "history": history,
     }
     return state, info
@@ -747,6 +867,7 @@ def solve_monolithic_contact_loadpath(
 ):
     """Advance a load path with the monolithic Newton step."""
     rank0 = state0["domain"].mpi_comm().rank == 0
+    dof_layout = _state_dof_layout(state0)
     steps = []
     for idx, entry in enumerate(load_schedule, start=1):
         if isinstance(entry, dict):
@@ -829,6 +950,9 @@ def solve_monolithic_contact_loadpath(
             "linear_converged": bool(step_info["linear_converged"]),
             "linear_iterations": int(step_info["total_linear_iterations"]),
             "ksp_reason": int(step_info["ksp_reason"]),
+            "outer_residual_norm_before_linear": float(step_info["outer_residual_norm_before_linear"]),
+            "outer_residual_norm_after_linear": float(step_info["outer_residual_norm_after_linear"]),
+            "relative_linear_reduction": float(step_info["relative_linear_reduction"]),
             "newton_iterations": int(step_info["newton_iterations"]),
             "residual_norm": float(step_info["residual_norm"]),
             "increment_norm": float(step_info["increment_norm"]),
@@ -836,6 +960,27 @@ def solve_monolithic_contact_loadpath(
             "negative_gap_sum": float(step_info["negative_gap_sum"]),
             "reaction_norm": float(step_info["reaction_norm"]),
             "max_penetration": float(step_info["max_penetration"]),
+            "mesh_resolution": dof_layout["mesh_resolution"],
+            "ndof_u": dof_layout["ndof_u"],
+            "ndof_phi": dof_layout["ndof_phi"],
+            "linear_iterations_list": [
+                int(item.get("linear_iterations", 0)) for item in step_info.get("history", [])
+            ],
+            "ksp_reason_list": [
+                int(item.get("ksp_reason", 0)) for item in step_info.get("history", [])
+            ],
+            "outer_residual_norm_before_linear_list": [
+                float(item.get("outer_residual_norm_before_linear", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "outer_residual_norm_after_linear_list": [
+                float(item.get("outer_residual_norm_after_linear", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "relative_linear_reduction_list": [
+                float(item.get("relative_linear_reduction", 0.0))
+                for item in step_info.get("history", [])
+            ],
             "cutback_level": int(step_data.get("cutback_level", 0)),
             "step_length": float(step_info.get("step_length", 0.0)),
             "cutback_triggered": False,
@@ -897,6 +1042,7 @@ def solve_monolithic_contact_loadpath(
         terminated_early,
         termination_reason,
     )
+    result.update(dof_layout)
     for item in attempt_history:
         item["terminated_early"] = result["terminated_early"]
         item["termination_reason"] = result["termination_reason"]

@@ -42,6 +42,9 @@ def main():
                 "baseline_label": label,
                 "mode": mode,
                 "mesh_resolution": summary["mesh_resolution"],
+                "ndof_u": summary["ndof_u"],
+                "ndof_phi": summary["ndof_phi"],
+                "total_dofs": summary["total_dofs"],
                 "backend": summary["backend"],
                 "linear_solver_mode": summary["linear_solver_mode"],
                 "ksp_type": summary["ksp_type"],
@@ -59,6 +62,8 @@ def main():
                 "accepted_step_count": summary["accepted_step_count"],
                 "total_newton_iterations": summary["total_newton_iterations_accepted"],
                 "total_linear_iterations": summary["total_linear_iterations_accepted"],
+                "avg_linear_iterations_per_newton": summary["avg_linear_iterations_per_newton"],
+                "ksp_reason_histogram": summary["ksp_reason_histogram"],
                 "cutback_count": summary["cutback_count"],
                 "final_residual_norm": summary["final_residual_norm"],
                 "final_reaction_norm": summary["final_reaction_norm"],
@@ -91,6 +96,9 @@ def main():
         print(f"baseline_label = {row['baseline_label']}")
         print(f"mode = {row['mode']}")
         print(f"  mesh_resolution = {row['mesh_resolution']}")
+        print(f"  ndof_u = {row['ndof_u']}")
+        print(f"  ndof_phi = {row['ndof_phi']}")
+        print(f"  total_dofs = {row['total_dofs']}")
         print(f"  backend = {row['backend']}")
         print(f"  linear_solver_mode = {row['linear_solver_mode']}")
         print(f"  ksp_type = {row['ksp_type']}")
@@ -105,6 +113,8 @@ def main():
         print(f"  accepted_step_count = {row['accepted_step_count']}")
         print(f"  total_newton_iterations = {row['total_newton_iterations']}")
         print(f"  total_linear_iterations = {row['total_linear_iterations']}")
+        print(f"  avg_linear_iterations_per_newton = {row['avg_linear_iterations_per_newton']}")
+        print(f"  ksp_reason_histogram = {row['ksp_reason_histogram']}")
         print(f"  cutback_count = {row['cutback_count']}")
         print(f"  final_residual_norm = {row['final_residual_norm']}")
         print(f"  final_reaction_norm = {row['final_reaction_norm']}")
