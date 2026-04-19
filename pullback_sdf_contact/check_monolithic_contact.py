@@ -14,12 +14,32 @@ from post.xdmf import write_scalar_field
 from check_indenter_block_contact import build_indenter_state, build_load_schedule
 
 
-def summarize_monolithic_result(result, mode, backend, max_newton_iter, line_search, damping):
+def summarize_monolithic_result(
+    result,
+    mode,
+    backend,
+    max_newton_iter,
+    line_search,
+    damping,
+    linear_solver_mode,
+    ksp_type,
+    pc_type,
+    block_pc_name,
+):
     accepted_history = result["accepted_history"]
     final_accepted = accepted_history[-1] if accepted_history else None
+    resolved_linear_solver_mode = (
+        linear_solver_mode if final_accepted is None else final_accepted.get("linear_solver_mode", linear_solver_mode)
+    )
+    resolved_ksp_type = ksp_type if final_accepted is None else final_accepted.get("ksp_type", ksp_type)
+    resolved_pc_type = pc_type if final_accepted is None else final_accepted.get("pc_type", pc_type)
+    resolved_block_pc_name = (
+        block_pc_name if final_accepted is None else final_accepted.get("block_pc_name", block_pc_name)
+    )
     return {
         "mode": mode,
         "backend": backend,
+        "mesh_resolution": result.get("mesh_resolution", ""),
         "line_search": bool(line_search),
         "damping": float(damping),
         "requested_final_target_load": result["requested_final_target_load"],
@@ -36,6 +56,16 @@ def summarize_monolithic_result(result, mode, backend, max_newton_iter, line_sea
             sum(item["newton_iterations"] for item in result["attempt_history"])
         ),
         "cutback_count": int(sum(1 for item in result["attempt_history"] if item["cutback_triggered"])),
+        "linear_solver_mode": resolved_linear_solver_mode,
+        "ksp_type": resolved_ksp_type,
+        "pc_type": resolved_pc_type,
+        "block_pc_name": resolved_block_pc_name,
+        "total_linear_iterations_accepted": int(
+            sum(item.get("linear_iterations", 0) for item in accepted_history)
+        ),
+        "total_linear_iterations_attempts": int(
+            sum(item.get("linear_iterations", 0) for item in result["attempt_history"])
+        ),
         "final_residual_norm": 0.0 if final_accepted is None else float(final_accepted["residual_norm"]),
         "final_reaction_norm": 0.0 if final_accepted is None else float(final_accepted["reaction_norm"]),
         "final_max_penetration": 0.0 if final_accepted is None else float(final_accepted["max_penetration"]),
@@ -46,7 +76,18 @@ def summarize_monolithic_result(result, mode, backend, max_newton_iter, line_sea
 def run_monolithic_case(
     mode,
     *,
+    mesh_scale="small",
+    nx=None,
+    ny=None,
+    nz=None,
     backend=None,
+    linear_solver_mode=None,
+    ksp_type=None,
+    pc_type=None,
+    block_pc_name=None,
+    ksp_rtol=None,
+    ksp_atol=None,
+    ksp_max_it=None,
     max_newton_iter=None,
     tol_res=1e-8,
     tol_inc=1e-8,
@@ -57,11 +98,30 @@ def run_monolithic_case(
     write_outputs=True,
     verbose=False,
 ):
-    state, solver_cfg, mode_cfg = build_indenter_state(mode)
-    load_schedule = build_load_schedule(mode)
+    state, solver_cfg, mode_cfg = build_indenter_state(
+        mode,
+        mesh_scale=mesh_scale,
+        nx=nx,
+        ny=ny,
+        nz=nz,
+    )
+    load_schedule = build_load_schedule(mode, mesh_scale=mesh_scale, nx=nx, ny=ny, nz=nz)
     history_path = None
     recommended = recommended_monolithic_contact_options()
     backend = recommended["backend"] if backend is None else backend
+    linear_solver_mode = (
+        recommended["linear_solver_mode"] if linear_solver_mode is None else linear_solver_mode
+    )
+    ksp_type = recommended["ksp_type"] if ksp_type is None else ksp_type
+    pc_type = recommended["pc_type"] if pc_type is None else pc_type
+    block_pc_name = recommended["block_pc_name"] if block_pc_name is None else block_pc_name
+    if linear_solver_mode == "lu":
+        block_pc_name = "global_lu"
+    elif pc_type != "fieldsplit" and block_pc_name.startswith("fieldsplit_"):
+        block_pc_name = f"global_{pc_type}"
+    ksp_rtol = recommended["ksp_rtol"] if ksp_rtol is None else float(ksp_rtol)
+    ksp_atol = recommended["ksp_atol"] if ksp_atol is None else float(ksp_atol)
+    ksp_max_it = recommended["ksp_max_it"] if ksp_max_it is None else int(ksp_max_it)
     max_newton_iter = recommended["max_newton_iter"] if max_newton_iter is None else max_newton_iter
     line_search = recommended["line_search"] if line_search is None else bool(line_search)
     damping = recommended["initial_damping"] if damping is None else float(damping)
@@ -70,12 +130,22 @@ def run_monolithic_case(
         recommended["backtrack_factor"] if backtrack_factor is None else float(backtrack_factor)
     )
 
-    history_path = f"monolithic_history_{mode}_{backend}.csv"
+    mesh_resolution = state.get("mesh_resolution", "")
+    history_path = (
+        f"monolithic_history_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}.csv"
+    )
     final_state, result = solve_monolithic_contact_loadpath(
         state,
         solver_cfg,
         load_schedule,
         backend=backend,
+        linear_solver_mode=linear_solver_mode,
+        ksp_type=ksp_type,
+        pc_type=pc_type,
+        block_pc_name=block_pc_name,
+        ksp_rtol=ksp_rtol,
+        ksp_atol=ksp_atol,
+        ksp_max_it=ksp_max_it,
         max_newton_iter=max_newton_iter,
         max_cutbacks=mode_cfg["max_cutbacks"],
         tol_res=tol_res,
@@ -89,23 +159,48 @@ def run_monolithic_case(
         verbose=verbose,
         min_cutback_increment=mode_cfg["min_cutback_increment"],
     )
-    summary = summarize_monolithic_result(result, mode, backend, max_newton_iter, line_search, damping)
+    summary = summarize_monolithic_result(
+        result,
+        mode,
+        backend,
+        max_newton_iter,
+        line_search,
+        damping,
+        linear_solver_mode,
+        ksp_type,
+        pc_type,
+        block_pc_name,
+    )
 
     phi_delta = final_state["phi"].vector.array_r - final_state["phi0"].vector.array_r
     summary["u_norm"] = float(np.linalg.norm(final_state["u"].vector.array_r))
     summary["phi_delta_norm"] = float(np.linalg.norm(phi_delta))
     summary["history_path"] = history_path
+    summary["mesh_resolution"] = mesh_resolution
 
     if write_outputs:
-        write_scalar_field(final_state["domain"], final_state["u"], f"output_u_monolithic_{mode}_{backend}.xdmf")
-        write_scalar_field(final_state["domain"], final_state["phi"], f"output_phi_monolithic_{mode}_{backend}.xdmf")
+        write_scalar_field(
+            final_state["domain"],
+            final_state["u"],
+            f"output_u_monolithic_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}.xdmf",
+        )
+        write_scalar_field(
+            final_state["domain"],
+            final_state["phi"],
+            f"output_phi_monolithic_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}.xdmf",
+        )
 
     return final_state, result, summary
 
 
 def print_case(result, summary):
     print(f"mode = {summary['mode']}")
+    print(f"  mesh_resolution = {summary['mesh_resolution']}")
     print(f"  backend = {summary['backend']}")
+    print(f"  linear_solver_mode = {summary['linear_solver_mode']}")
+    print(f"  ksp_type = {summary['ksp_type']}")
+    print(f"  pc_type = {summary['pc_type']}")
+    print(f"  block_pc_name = {summary['block_pc_name']}")
     print(f"  line_search = {summary['line_search']}")
     print(f"  damping = {summary['damping']}")
     print(f"  requested_final_target_load = {summary['requested_final_target_load']}")
@@ -117,6 +212,8 @@ def print_case(result, summary):
     print(f"  attempt_count = {summary['attempt_count']}")
     print(f"  total_newton_iterations_accepted = {summary['total_newton_iterations_accepted']}")
     print(f"  total_newton_iterations_attempts = {summary['total_newton_iterations_attempts']}")
+    print(f"  total_linear_iterations_accepted = {summary['total_linear_iterations_accepted']}")
+    print(f"  total_linear_iterations_attempts = {summary['total_linear_iterations_attempts']}")
     print(f"  cutback_count = {summary['cutback_count']}")
     print(f"  final_residual_norm = {summary['final_residual_norm']}")
     print(f"  final_reaction_norm = {summary['final_reaction_norm']}")
@@ -129,17 +226,28 @@ def print_case(result, summary):
             "    state={accepted_state_index:02d} step={step:02d} load={load_value:.4f} "
             "newton_iterations={newton_iterations} residual_norm={residual_norm:.6e} "
             "reaction_norm={reaction_norm:.6e} active={active_contact_points} "
-            "step_length={step_length:.3f}".format(**item)
+            "linear_iterations={linear_iterations} step_length={step_length:.3f}".format(**item)
         )
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "aggressive", "all"], default="baseline")
+    parser.add_argument("--mesh-scale", choices=["small", "larger"], default="small")
+    parser.add_argument("--nx", type=int, default=None)
+    parser.add_argument("--ny", type=int, default=None)
+    parser.add_argument("--nz", type=int, default=None)
     parser.add_argument("--backend", choices=["dense", "petsc_block"], default=None)
+    parser.add_argument("--linear-solver", choices=["lu", "krylov"], default=None)
     parser.add_argument("--max-newton-iter", type=int, default=None)
     parser.add_argument("--line-search", choices=["on", "off"], default=None)
     parser.add_argument("--damping", type=float, default=None)
+    parser.add_argument("--ksp-type", default=None)
+    parser.add_argument("--pc-type", default=None)
+    parser.add_argument("--block-pc-name", default=None)
+    parser.add_argument("--ksp-rtol", type=float, default=None)
+    parser.add_argument("--ksp-atol", type=float, default=None)
+    parser.add_argument("--ksp-max-it", type=int, default=None)
     args = parser.parse_args()
 
     modes = ["baseline", "aggressive"] if args.mode == "all" else [args.mode]
@@ -151,12 +259,32 @@ def main():
         recommended["max_newton_iter"] if args.max_newton_iter is None else args.max_newton_iter
     )
     resolved_backend = recommended["backend"] if args.backend is None else args.backend
+    resolved_linear_solver = (
+        recommended["linear_solver_mode"] if args.linear_solver is None else args.linear_solver
+    )
     resolved_damping = (
         recommended["initial_damping"] if args.damping is None else args.damping
     )
+    resolved_ksp_type = recommended["ksp_type"] if args.ksp_type is None else args.ksp_type
+    resolved_pc_type = recommended["pc_type"] if args.pc_type is None else args.pc_type
+    resolved_block_pc_name = (
+        recommended["block_pc_name"] if args.block_pc_name is None else args.block_pc_name
+    )
+    resolved_ksp_rtol = recommended["ksp_rtol"] if args.ksp_rtol is None else args.ksp_rtol
+    resolved_ksp_atol = recommended["ksp_atol"] if args.ksp_atol is None else args.ksp_atol
+    resolved_ksp_max_it = (
+        recommended["ksp_max_it"] if args.ksp_max_it is None else args.ksp_max_it
+    )
     print("Monolithic contact regression")
     print("")
+    print(f"mesh_scale = {args.mesh_scale}")
+    if args.nx is not None or args.ny is not None or args.nz is not None:
+        print(f"mesh_override = ({args.nx}, {args.ny}, {args.nz})")
     print(f"backend = {resolved_backend}")
+    print(f"linear_solver_mode = {resolved_linear_solver}")
+    print(f"ksp_type = {resolved_ksp_type}")
+    print(f"pc_type = {resolved_pc_type}")
+    print(f"block_pc_name = {resolved_block_pc_name}")
     print(f"max_newton_iter = {resolved_max_newton_iter}")
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
@@ -164,7 +292,18 @@ def main():
     for mode in modes:
         _, result, summary = run_monolithic_case(
             mode,
+            mesh_scale=args.mesh_scale,
+            nx=args.nx,
+            ny=args.ny,
+            nz=args.nz,
             backend=resolved_backend,
+            linear_solver_mode=resolved_linear_solver,
+            ksp_type=resolved_ksp_type,
+            pc_type=resolved_pc_type,
+            block_pc_name=resolved_block_pc_name,
+            ksp_rtol=resolved_ksp_rtol,
+            ksp_atol=resolved_ksp_atol,
+            ksp_max_it=resolved_ksp_max_it,
             max_newton_iter=resolved_max_newton_iter,
             line_search=resolved_line_search,
             damping=resolved_damping,

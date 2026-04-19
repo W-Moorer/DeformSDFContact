@@ -15,6 +15,13 @@ RECOMMENDED_MONOLITHIC_MAX_BACKTRACKS = 8
 RECOMMENDED_MONOLITHIC_BACKTRACK_FACTOR = 0.5
 RECOMMENDED_MONOLITHIC_TOL_RES = 1e-8
 RECOMMENDED_MONOLITHIC_TOL_INC = 1e-8
+RECOMMENDED_MONOLITHIC_LINEAR_SOLVER_MODE = "lu"
+RECOMMENDED_MONOLITHIC_KSP_TYPE = "gmres"
+RECOMMENDED_MONOLITHIC_PC_TYPE = "fieldsplit"
+RECOMMENDED_MONOLITHIC_BLOCK_PC_NAME = "fieldsplit_multiplicative_ilu"
+RECOMMENDED_MONOLITHIC_KSP_RTOL = 1e-10
+RECOMMENDED_MONOLITHIC_KSP_ATOL = 1e-12
+RECOMMENDED_MONOLITHIC_KSP_MAX_IT = 400
 
 
 def recommended_monolithic_contact_options(**overrides):
@@ -28,6 +35,13 @@ def recommended_monolithic_contact_options(**overrides):
         "backtrack_factor": RECOMMENDED_MONOLITHIC_BACKTRACK_FACTOR,
         "tol_res": RECOMMENDED_MONOLITHIC_TOL_RES,
         "tol_inc": RECOMMENDED_MONOLITHIC_TOL_INC,
+        "linear_solver_mode": RECOMMENDED_MONOLITHIC_LINEAR_SOLVER_MODE,
+        "ksp_type": RECOMMENDED_MONOLITHIC_KSP_TYPE,
+        "pc_type": RECOMMENDED_MONOLITHIC_PC_TYPE,
+        "block_pc_name": RECOMMENDED_MONOLITHIC_BLOCK_PC_NAME,
+        "ksp_rtol": RECOMMENDED_MONOLITHIC_KSP_RTOL,
+        "ksp_atol": RECOMMENDED_MONOLITHIC_KSP_ATOL,
+        "ksp_max_it": RECOMMENDED_MONOLITHIC_KSP_MAX_IT,
     }
     options.update(overrides)
     return options
@@ -112,6 +126,13 @@ def _write_history_csv(history, history_path):
         "load_increment",
         "converged",
         "backend",
+        "linear_solver_mode",
+        "ksp_type",
+        "pc_type",
+        "block_pc_name",
+        "linear_converged",
+        "linear_iterations",
+        "ksp_reason",
         "newton_iterations",
         "residual_norm",
         "increment_norm",
@@ -203,15 +224,105 @@ def _create_petsc_aij_from_dense(matrix, comm):
     return mat
 
 
-def _solve_petsc_linear_system(A, rhs):
+def _configure_ksp_for_fieldsplit(solver, A, ndof_u, ndof_phi, *, block_pc_name):
+    pc = solver.getPC()
+    pc.setType(PETSc.PC.Type.FIELDSPLIT)
+    if block_pc_name.startswith("fieldsplit_additive_"):
+        pc.setFieldSplitType(PETSc.PC.CompositeType.ADDITIVE)
+    elif block_pc_name.startswith("fieldsplit_multiplicative_"):
+        pc.setFieldSplitType(PETSc.PC.CompositeType.MULTIPLICATIVE)
+    elif block_pc_name.startswith("fieldsplit_symmetric_multiplicative_"):
+        pc.setFieldSplitType(PETSc.PC.CompositeType.SYMMETRIC_MULTIPLICATIVE)
+    else:
+        raise ValueError(f"Unsupported block_pc_name: {block_pc_name}")
+    comm = A.getComm()
+    u_is = PETSc.IS().createGeneral(np.arange(ndof_u, dtype=np.int32), comm=comm)
+    phi_is = PETSc.IS().createGeneral(
+        np.arange(ndof_u, ndof_u + ndof_phi, dtype=np.int32), comm=comm
+    )
+    pc.setFieldSplitIS(("u", u_is), ("phi", phi_is))
+    solver.setUp()
+    subksps = pc.getFieldSplitSubKSP()
+    if len(subksps) != 2:
+        raise RuntimeError(f"Expected 2 fieldsplit sub-KSPs, got {len(subksps)}")
+
+    if block_pc_name in {
+        "fieldsplit_additive_ilu",
+        "fieldsplit_multiplicative_ilu",
+        "fieldsplit_symmetric_multiplicative_ilu",
+    }:
+        for sub in subksps:
+            sub.setType("preonly")
+            sub.getPC().setType("ilu")
+    elif block_pc_name in {
+        "fieldsplit_additive_lu",
+        "fieldsplit_multiplicative_lu",
+        "fieldsplit_symmetric_multiplicative_lu",
+    }:
+        for sub in subksps:
+            sub.setType("preonly")
+            sub.getPC().setType("lu")
+    else:
+        raise ValueError(f"Unsupported block_pc_name: {block_pc_name}")
+
+    return subksps
+
+
+def _solve_petsc_linear_system(
+    A,
+    rhs,
+    *,
+    ndof_u,
+    ndof_phi,
+    linear_solver_mode="lu",
+    ksp_type="gmres",
+    pc_type="fieldsplit",
+    block_pc_name="fieldsplit_additive_ilu",
+    ksp_rtol=1e-10,
+    ksp_atol=1e-12,
+    ksp_max_it=400,
+):
     x = rhs.duplicate()
     x.set(0.0)
     solver = PETSc.KSP().create(A.getComm())
     solver.setOperators(A)
-    solver.setType("preonly")
-    solver.getPC().setType("lu")
+    if linear_solver_mode == "lu":
+        solver.setType("preonly")
+        solver.getPC().setType("lu")
+        resolved_ksp_type = "preonly"
+        resolved_pc_type = "lu"
+        resolved_block_pc_name = "global_lu"
+    elif linear_solver_mode == "krylov":
+        solver.setType(ksp_type)
+        solver.setTolerances(rtol=float(ksp_rtol), atol=float(ksp_atol), max_it=int(ksp_max_it))
+        pc = solver.getPC()
+        resolved_ksp_type = ksp_type
+        resolved_pc_type = pc_type
+        if pc_type == "fieldsplit":
+            resolved_block_pc_name = block_pc_name
+            _configure_ksp_for_fieldsplit(
+                solver,
+                A,
+                ndof_u,
+                ndof_phi,
+                block_pc_name=block_pc_name,
+            )
+        else:
+            pc.setType(pc_type)
+            resolved_block_pc_name = f"global_{pc_type}"
+    else:
+        raise ValueError(f"Unsupported linear_solver_mode: {linear_solver_mode}")
     solver.solve(rhs, x)
-    return x.getArray().copy(), solver
+    info = {
+        "linear_solver_mode": linear_solver_mode,
+        "ksp_type": resolved_ksp_type,
+        "pc_type": resolved_pc_type,
+        "block_pc_name": resolved_block_pc_name,
+        "linear_iterations": int(solver.getIterationNumber()),
+        "ksp_reason": int(solver.getConvergedReason()),
+        "linear_converged": int(solver.getConvergedReason()) > 0,
+    }
+    return x.getArray().copy(), solver, info
 
 
 def _dense_block_system_from_blocks(state, assembled):
@@ -378,6 +489,13 @@ def solve_monolithic_contact(
     cfg,
     *,
     backend="dense",
+    linear_solver_mode="lu",
+    ksp_type="gmres",
+    pc_type="fieldsplit",
+    block_pc_name="fieldsplit_additive_ilu",
+    ksp_rtol=1e-10,
+    ksp_atol=1e-12,
+    ksp_max_it=400,
     max_newton_iter=15,
     tol_res=1e-8,
     tol_inc=1e-8,
@@ -397,11 +515,20 @@ def solve_monolithic_contact(
         residual = assembled["global_residual_array"]
         residual_norm = float(np.linalg.norm(residual))
         if residual_norm < tol_res:
+            total_linear_iterations = int(sum(item["linear_iterations"] for item in history))
             info = {
                 "newton_iterations": newton_it - 1,
                 "converged": True,
                 "failure_reason": "",
                 "backend": backend,
+                "linear_solver_mode": linear_solver_mode,
+                "ksp_type": "preonly" if linear_solver_mode == "lu" else ksp_type,
+                "pc_type": "lu" if linear_solver_mode == "lu" else pc_type,
+                "block_pc_name": "global_lu" if linear_solver_mode == "lu" else block_pc_name,
+                "linear_converged": True,
+                "linear_iterations": 0,
+                "total_linear_iterations": total_linear_iterations,
+                "ksp_reason": 0,
                 "residual_norm": residual_norm,
                 "increment_norm": 0.0,
                 "active_contact_points": assembled["diagnostics"]["active_contact_points"],
@@ -414,11 +541,40 @@ def solve_monolithic_contact(
             return state, info
 
         try:
+            linear_info = {
+                "linear_solver_mode": linear_solver_mode,
+                "ksp_type": "",
+                "pc_type": "",
+                "block_pc_name": "",
+                "linear_converged": True,
+                "linear_iterations": 0,
+                "ksp_reason": 0,
+            }
             if backend == "dense":
                 delta = np.linalg.solve(assembled["global_jacobian_dense"], -residual)
             elif backend == "petsc_block":
                 rhs = _create_petsc_vec_from_array(-residual, state["domain"].mpi_comm())
-                delta, _ = _solve_petsc_linear_system(assembled["global_jacobian_mat"], rhs)
+                ndof_u = state["u"].vector.getLocalSize()
+                ndof_phi = state["phi"].vector.getLocalSize()
+                delta, _, linear_info = _solve_petsc_linear_system(
+                    assembled["global_jacobian_mat"],
+                    rhs,
+                    ndof_u=ndof_u,
+                    ndof_phi=ndof_phi,
+                    linear_solver_mode=linear_solver_mode,
+                    ksp_type=ksp_type,
+                    pc_type=pc_type,
+                    block_pc_name=block_pc_name,
+                    ksp_rtol=ksp_rtol,
+                    ksp_atol=ksp_atol,
+                    ksp_max_it=ksp_max_it,
+                )
+                if not linear_info["linear_converged"]:
+                    failure_reason = (
+                        "monolithic linear solve failed: "
+                        f"ksp_reason={linear_info['ksp_reason']}"
+                    )
+                    break
             else:
                 raise ValueError(f"Unsupported monolithic backend: {backend}")
         except (np.linalg.LinAlgError, RuntimeError) as exc:
@@ -472,6 +628,13 @@ def solve_monolithic_contact(
             "step_length": step_length,
             "used_fallback": used_fallback,
             "backend": backend,
+            "linear_solver_mode": linear_info["linear_solver_mode"],
+            "ksp_type": linear_info["ksp_type"],
+            "pc_type": linear_info["pc_type"],
+            "block_pc_name": linear_info["block_pc_name"],
+            "linear_converged": linear_info["linear_converged"],
+            "linear_iterations": linear_info["linear_iterations"],
+            "ksp_reason": linear_info["ksp_reason"],
         }
         history.append(row)
 
@@ -480,16 +643,26 @@ def solve_monolithic_contact(
                 f"Newton iter {newton_it}: "
                 f"||R||={residual_norm:.6e} -> {residual_after:.6e}, "
                 f"||d||={increment_norm:.6e}, alpha={step_length:.3f}, "
+                f"lin_it={row['linear_iterations']}, "
                 f"active={row['active_contact_points_after']}, "
                 f"gap_sum={row['negative_gap_sum_after']:.6e}"
             )
 
         if residual_after < tol_res or increment_norm * step_length < tol_inc:
+            total_linear_iterations = int(sum(item["linear_iterations"] for item in history))
             info = {
                 "newton_iterations": newton_it,
                 "converged": True,
                 "failure_reason": "",
                 "backend": backend,
+                "linear_solver_mode": row["linear_solver_mode"],
+                "ksp_type": row["ksp_type"],
+                "pc_type": row["pc_type"],
+                "block_pc_name": row["block_pc_name"],
+                "linear_converged": row["linear_converged"],
+                "linear_iterations": row["linear_iterations"],
+                "total_linear_iterations": total_linear_iterations,
+                "ksp_reason": row["ksp_reason"],
                 "residual_norm": residual_after,
                 "increment_norm": increment_norm * step_length,
                 "active_contact_points": row["active_contact_points_after"],
@@ -512,12 +685,28 @@ def solve_monolithic_contact(
         "max_penetration_after": 0.0,
         "residual_norm": np.inf,
         "step_length": 0.0,
+        "linear_solver_mode": linear_solver_mode,
+        "ksp_type": "preonly" if linear_solver_mode == "lu" else ksp_type,
+        "pc_type": "lu" if linear_solver_mode == "lu" else pc_type,
+        "block_pc_name": "global_lu" if linear_solver_mode == "lu" else block_pc_name,
+        "linear_converged": False,
+        "linear_iterations": 0,
+        "ksp_reason": 0,
     }
+    total_linear_iterations = int(sum(item["linear_iterations"] for item in history))
     info = {
         "newton_iterations": len(history),
         "converged": False,
         "failure_reason": failure_reason,
         "backend": backend,
+        "linear_solver_mode": last["linear_solver_mode"],
+        "ksp_type": last["ksp_type"],
+        "pc_type": last["pc_type"],
+        "block_pc_name": last["block_pc_name"],
+        "linear_converged": last["linear_converged"],
+        "linear_iterations": last["linear_iterations"],
+        "total_linear_iterations": total_linear_iterations,
+        "ksp_reason": last["ksp_reason"],
         "residual_norm": last["residual_norm"],
         "increment_norm": last["increment_norm"],
         "active_contact_points": last["active_contact_points_after"],
@@ -536,6 +725,13 @@ def solve_monolithic_contact_loadpath(
     load_schedule,
     *,
     backend="dense",
+    linear_solver_mode="lu",
+    ksp_type="gmres",
+    pc_type="fieldsplit",
+    block_pc_name="fieldsplit_additive_ilu",
+    ksp_rtol=1e-10,
+    ksp_atol=1e-12,
+    ksp_max_it=400,
     max_newton_iter=15,
     max_cutbacks=6,
     tol_res=1e-8,
@@ -597,6 +793,13 @@ def solve_monolithic_contact_loadpath(
             state0,
             cfg,
             backend=backend,
+            linear_solver_mode=linear_solver_mode,
+            ksp_type=ksp_type,
+            pc_type=pc_type,
+            block_pc_name=block_pc_name,
+            ksp_rtol=ksp_rtol,
+            ksp_atol=ksp_atol,
+            ksp_max_it=ksp_max_it,
             max_newton_iter=max_newton_iter,
             tol_res=tol_res,
             tol_inc=tol_inc,
@@ -619,6 +822,13 @@ def solve_monolithic_contact_loadpath(
             "load_increment": load_increment,
             "converged": bool(step_info["converged"]),
             "backend": backend,
+            "linear_solver_mode": step_info["linear_solver_mode"],
+            "ksp_type": step_info["ksp_type"],
+            "pc_type": step_info["pc_type"],
+            "block_pc_name": step_info["block_pc_name"],
+            "linear_converged": bool(step_info["linear_converged"]),
+            "linear_iterations": int(step_info["total_linear_iterations"]),
+            "ksp_reason": int(step_info["ksp_reason"]),
             "newton_iterations": int(step_info["newton_iterations"]),
             "residual_norm": float(step_info["residual_norm"]),
             "increment_norm": float(step_info["increment_norm"]),

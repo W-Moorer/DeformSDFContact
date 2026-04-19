@@ -4,6 +4,7 @@
 \usepackage{amsmath,amssymb,amsfonts,bm,mathtools}
 \usepackage{booktabs,multirow,array}
 \usepackage{graphicx}
+\graphicspath{{figures/}}
 \usepackage{hyperref}
 \usepackage{enumitem}
 \usepackage{algorithm}
@@ -89,7 +90,7 @@
     \item 推导罚函数法与增广拉格朗日法下接触残量关于位移与距离场的严格几何线性化，为高保真柔性接触分析提供统一理论框架。
 \end{enumerate}
 
-全文结构如下：第~\ref{sec:geom-theory} 节建立时变 SDF 的几何理论；第~\ref{sec:anisotropic-eikonal} 节给出 pull-back 距离场与各向异性 Eikonal 主方程；第~\ref{sec:fem-sdf} 节推导其有限元离散与一致切线；第~\ref{sec:coupling} 节建立与结构位移场耦合的整体一致线性化；第~\ref{sec:contact-coupling} 节进一步给出接触残量在罚函数与增广拉格朗日框架下的严格几何线性化；第~\ref{sec:algorithms} 节总结 monolithic Newton 算法流程；第~\ref{sec:numerics} 节给出数值实验设计建议；最后在第~\ref{sec:conclusion} 节给出总结与展望。
+全文结构如下：第~\ref{sec:geom-theory} 节建立时变 SDF 的几何理论；第~\ref{sec:anisotropic-eikonal} 节给出 pull-back 距离场与各向异性 Eikonal 主方程；第~\ref{sec:fem-sdf} 节推导其有限元离散与一致切线；第~\ref{sec:coupling} 节建立与结构位移场耦合的整体一致线性化；第~\ref{sec:contact-coupling} 节进一步给出接触残量在罚函数与增广拉格朗日框架下的严格几何线性化；第~\ref{sec:algorithms} 节总结 monolithic Newton 算法流程；第~\ref{sec:numerics} 节给出数值实验设计建议；第~\ref{sec:stage-results} 节给出当前阶段的数值进展、benchmark 汇总与组会汇报导向的图表；最后在第~\ref{sec:conclusion} 节给出总结与展望。
 
 \section{时变符号距离场的几何理论}\label{sec:geom-theory}
 
@@ -981,6 +982,280 @@ k_n\,\bm{G}_u^T\bm{G}_a + \lambda_n\,\bE^T\bB_\phi(\bX_c)
     \item 忽略严格几何项 $\bm{H}_{uu}^{(g)}$ 与保留严格几何项时的牛顿收敛行为；
     \item 线性 SDF 单元与二次 SDF 单元下曲率项 $\bH_\phi$ 的影响。
 \end{enumerate}
+
+\section{阶段性数值结果与当前进展}\label{sec:stage-results}
+
+本节不再重复前文的几何推导与一致线性化细节，而是对当前已经完成并复现实验结果的数值里程碑做一次集中总结。现阶段最重要的事实是：项目已经从单点局部公式校验，推进到了 assembled staggered baseline 冻结、dense monolithic 跑通、PETSc 等价实现验证，以及 Krylov 路线接通。换言之，当前工作已经不再停留在“公式是否写对”的层面，而是形成了一条从局部正确性、到系统求解器、再到工程实现路径逐步闭合的推进链条。
+
+当前 benchmark 仍然聚焦于小规模 indenter/block 问题。本文将 \emph{baseline} 工况理解为温和载荷路径下的稳定压入测试，将 \emph{aggressive} 工况理解为更大载荷增量、更高 penalty、更强非线性的压入测试。对于当前阶段而言，这两组算例已经足以回答三个关键问题：第一，局部接触几何与切线是否严格正确；第二，assembled staggered 路径能否稳定形成一个可复现实用基线；第三，monolithic 路线是否已经从 dense 走到 PETSc，并进一步接通 Krylov 与 block-aware 线性求解路径。
+
+\subsection{当前 benchmark 的物理含义}
+
+当前算例的物理设置可以概括为一个最小但完整的压入模型：一个单位立方体弹性块体占据区域 $[0,1]^3$，底面固定，顶部作为 slave 接触面；上方使用一个沿 $z$ 方向向下推进的刚性平面作为压头。每个 load step 的含义就是让这个刚性平面再向下移动一小段，然后求解块体位移场与 pull-back SDF 场的耦合响应。因此，这个 benchmark 的核心不是复杂压头几何，而是一个\textbf{刚性平面压入弹性块体}的最小可复现实验。
+
+在这个设定下，baseline 与 aggressive 的区别也很明确：baseline 使用较温和的材料/罚参数与较小载荷步长（$0\rightarrow 0.02\rightarrow 0.04\rightarrow 0.06$），用于建立稳定基线；aggressive 使用更软的材料、更强的 penalty 和更大的载荷步长（$0\rightarrow 0.04\rightarrow 0.08\rightarrow 0.12$），用于放大接触非线性并检验求解器在更困难载荷路径下的稳定性。也就是说，这两个工况并不是两个不同物理问题，而是同一个压入模型在两种数值难度级别下的对照。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.74\textwidth]{stage_summary_benchmark_schematic.pdf}
+\caption{当前 benchmark 的物理示意图：底面固定的弹性块体、顶部 slave 接触面，以及沿 $z$ 方向向下推进的刚性平面压头。baseline 与 aggressive 的区别不在于模型拓扑改变，而在于材料/罚参数和载荷步长设置不同。}
+\label{fig:stage-benchmark-schematic}
+\end{figure}
+
+仅有示意图还不够，当前 benchmark 的约束与参数也需要明确写清。这里的弹性块体始终定义在参考域 $[0,1]^3$ 上；主汇报结果对应的小网格为 $3\times 3\times 3$ 六面体剖分，后续 block preconditioner 扩展验证额外使用了 $4\times 4\times 4$ 网格。结构边界条件方面，底面施加三向全固定 Dirichlet 约束；顶面\emph{不}施加位移 Dirichlet 约束，而是作为 slave 接触面参与接触装配，刚性平面压头的推进通过每个 load step 中附加到当前 slave 点位置的竖向 offset 实现；其余四个侧面保持自由。SDF 子问题方面，在顶面施加 $\phi=0$ 的 Dirichlet 条件，从而把参考域中的零水平集固定在初始接触面上；窄带积分区域取为 $z\ge 0.7$。材料采用线弹性模型，体力项恒为零，泊松比固定为 $\nu=0.3$，SDF 正则项参数固定为 $\beta=10^{-6}$。在此基础上，baseline 与 aggressive 只在材料刚度、罚参数和载荷路径上区分，分别对应温和与更强的非线性路径。
+
+\begin{table}[H]
+\centering
+\caption{当前 indenter/block benchmark 的约束与参数设置}
+\label{tab:benchmark-setup}
+\small
+\begin{tabular}{p{4.4cm} p{9.8cm}}
+\toprule
+项目 & 设置 \\
+\midrule
+参考域 & 单位立方体 $[0,1]^3$ \\
+主汇报网格 & $3\times 3\times 3$ 六面体；block preconditioner 扩展验证使用 $4\times 4\times 4$ \\
+窄带区域 & $z\ge 0.7$ \\
+结构边界条件 & 底面三向全固定；四个侧面自由；顶面不施加位移 Dirichlet，而是作为 slave 接触面 \\
+接触加载方式 & 刚性平面压头沿 $z$ 方向下压；每个 load step 通过 slave 当前坐标上的竖向 offset 实现 \\
+SDF 边界条件 & 顶面施加 $\phi=0$，将 pull-back SDF 的零水平集固定在参考顶面 \\
+材料模型 & 线弹性，$\nu=0.3$，$f_z=0$ \\
+SDF 参数 & 二次元，$\beta=10^{-6}$ \\
+baseline 参数 & $E=100$，penalty $=1$，load path: $0\rightarrow 0.02\rightarrow 0.04\rightarrow 0.06$ \\
+aggressive 参数 & $E=40$，penalty $=5$，load path: $0\rightarrow 0.04\rightarrow 0.08\rightarrow 0.12$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{局部正确性验证汇总}
+
+表~\ref{tab:local-verification} 汇总了当前所有已经完成并通过的局部层面校验。它们共同构成了后续 assembled solver 与 monolithic solver 的可信基础。特别地，接触切线中的 $\bm{\mathcal G}_F/\bm{\mathcal G}_L$ 几何项在差分实验中被证明是不可忽略的，这意味着当前求解器路径并不是基于“弱化几何”近似，而是建立在严格几何线性化之上的。
+
+\begin{table}[H]
+\centering
+\caption{局部正确性与装配层面的阶段性验证汇总}
+\label{tab:local-verification}
+\small
+\begin{tabular}{p{5.0cm} p{3.0cm} p{6.8cm}}
+\toprule
+验证对象 & 状态 & 说明 \\
+\midrule
+pull-back SDF 主方程与有限元离散 & verified & 主方程、变分最小二乘离散与残量装配已经实现 \\
+$K_{\phi u}$ 差分校验 & passed & 结构位移对 SDF 子问题的耦合切线已通过有限差分 \\
+单点接触几何灵敏度 & passed & $X_c,g_n,n,G_u,G_a$ 的一阶敏感度已校验 \\
+单点 $K_{u\phi}^c$ 差分校验 & passed & SDF 自由度对接触残量的切线已通过有限差分 \\
+单点 $K_{uu}^c$ 差分校验 & passed & 含 $GF/GL$ 几何项的位移切线已通过有限差分 \\
+surface assembly & passed & $R_u^c, K_{u\phi}^c, K_{uu}^c$ 的面积分装配已跑通 \\
+penalty scaling check & passed & penalty 放大后接触残量呈一致比例缩放 \\
+几何项 $GF/GL$ 作用 & benchmarked & 在接触切线中是重要贡献，不能忽略 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{冻结的 staggered baseline}
+
+在局部层面验证完成之后，项目首先收口为一个可稳定复现的 assembled staggered contact baseline。当前推荐配置为：
+\begin{equation*}
+\texttt{contact\_structure\_mode = consistent\_linearized},\qquad
+\texttt{max\_outer\_iter = 10},\qquad
+\texttt{relaxation\_u = 1.0}.
+\end{equation*}
+在这一配置下，baseline 和 aggressive 两个工况都能够完整达到目标载荷，且无需 cutback。表~\ref{tab:staggered-baseline} 给出了冻结后的 staggered 基线结果。可以看到，aggressive 工况相对于 baseline 明显增加了总外层迭代数和最终反力水平，但整体求解流程仍然保持稳定闭合。
+
+\begin{table}[H]
+\centering
+\caption{冻结的 assembled staggered baseline}
+\label{tab:staggered-baseline}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+工况 & final load & reached target & outer iters & cutbacks & reaction norm & max penetration \\
+\midrule
+baseline & 0.06 & True & 17 & 0 & 0.014005056884434684 & 0.060030828999713466 \\
+aggressive & 0.12 & True & 29 & 0 & 0.12471645523527924 & 0.12127179623496781 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{从 staggered 到 monolithic 的阶段推进}
+
+在冻结 staggered baseline 之后，项目进一步接通了 monolithic 块系统。当前采用的块残量与块 Jacobian 语义为
+\begin{equation*}
+R_u^{\mathrm{mono}} = R_u - R_u^c,\qquad
+R_\phi^{\mathrm{mono}} = R_\phi,
+\end{equation*}
+\begin{equation*}
+J_{uu}=K_{uu}^{\mathrm{struct}}-K_{uu}^c,\qquad
+J_{u\phi}=-K_{u\phi}^c,\qquad
+J_{\phi u}=K_{\phi u},\qquad
+J_{\phi\phi}=K_{\phi\phi}.
+\end{equation*}
+这意味着本文的 monolithic 路线并不是“额外再造一套求解器”，而是把前文已经严格校验过的各个局部块，统一收口到一个闭合的 Newton 系统中。
+
+表~\ref{tab:staggered-vs-monolithic} 对比了当前小规模 benchmark 下的三条主路径：冻结的 staggered baseline、dense monolithic、以及 PETSc/LU monolithic。结果非常清楚：三条路径在 baseline 与 aggressive 两个工况上的最终反力和最大压入量都对齐到很小误差，而 monolithic 的总迭代数更少。这说明 monolithic 路线已经不仅仅是“能够跑起来”，而是在当前 benchmark 上形成了明确的求解器层优势。
+
+\begin{table}[H]
+\centering
+\caption{staggered 与 monolithic 路径的阶段性对照}
+\label{tab:staggered-vs-monolithic}
+\small
+\begin{tabular}{llcccc}
+\toprule
+工况 & 求解路径 & final load & total iters & reaction norm & max penetration \\
+\midrule
+baseline & staggered & 0.06 & 17 & 0.014005056884434684 & 0.060030828999713466 \\
+baseline & mono-dense & 0.06 & 9 & 0.014005056882432254 & 0.06003082899505898 \\
+baseline & mono-PETSc/LU & 0.06 & 9 & 0.014005056882432254 & 0.06003082899505898 \\
+\midrule
+aggressive & staggered & 0.12 & 29 & 0.12471645523527924 & 0.12127179623496781 \\
+aggressive & mono-dense & 0.12 & 21 & 0.12471645522372302 & 0.12127179622886528 \\
+aggressive & mono-PETSc/LU & 0.12 & 21 & 0.12471645522372300 & 0.12127179622886528 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{stage_summary_staggered_vs_monolithic_iterations.pdf}
+\caption{当前阶段三条主求解路径的总迭代数对比。对于这两个小规模 benchmark，monolithic 路线已经稳定表现出比冻结的 staggered baseline 更少的非线性迭代次数。}
+\label{fig:stage-iterations}
+\end{figure}
+
+\subsection{dense 与 PETSc 等价性}
+
+为了使 monolithic 路线能够从“数值原型”推进到更正式的 PETSc 实现，项目进一步完成了 dense 与 PETSc 的组装等价性核查。目前采用的 PETSc 路径是“块先组装，再写入一个 PETSc AIJ 全局矩阵”，而不是 MatNest/VecNest。固定状态下的等价性结果如表~\ref{tab:dense-vs-petsc-equivalence} 所示。残量、各个 Jacobian 子块、全局 Jacobian 以及 Newton 增量都对齐到机器精度，这为后续 Krylov 与 block preconditioning 的工程推进提供了可靠参考路径。
+
+\begin{table}[H]
+\centering
+\caption{dense 与 PETSc monolithic 的组装等价性（baseline, load = 0.02）}
+\label{tab:dense-vs-petsc-equivalence}
+\small
+\begin{tabular}{lc}
+\toprule
+比较量 & 差异范数 \\
+\midrule
+$\|R_{\mathrm{dense}} - R_{\mathrm{PETSc}}\|_2$ & 0.0 \\
+$\|J_{uu}^{\mathrm{dense}} - J_{uu}^{\mathrm{PETSc}}\|_F$ & 0.0 \\
+$\|J_{u\phi}^{\mathrm{dense}} - J_{u\phi}^{\mathrm{PETSc}}\|_F$ & 0.0 \\
+$\|J_{\phi u}^{\mathrm{dense}} - J_{\phi u}^{\mathrm{PETSc}}\|_F$ & 0.0 \\
+$\|J_{\phi\phi}^{\mathrm{dense}} - J_{\phi\phi}^{\mathrm{PETSc}}\|_F$ & 0.0 \\
+$\|J_{\mathrm{global}}^{\mathrm{dense}} - J_{\mathrm{global}}^{\mathrm{PETSc}}\|_F$ & 0.0 \\
+$\|\Delta x_{\mathrm{dense}} - \Delta x_{\mathrm{PETSc}}\|_2$ & $1.434348696139268\times 10^{-18}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{LU 与 Krylov 的阶段性对照}
+
+在 PETSc/LU 路径冻结为 reference baseline 之后，项目进一步接通了 PETSc/Krylov 路线。当前小规模 benchmark 上，GMRES + fieldsplit 路径已经能够与 LU 路径在终态量上保持很小误差的一致性。表~\ref{tab:lu-vs-krylov} 汇总了这一阶段最关键的对照结果：baseline 与 aggressive 两个工况下，LU 与 Krylov 的 final load、final reaction norm 与最大压入量都对齐，同时总 Newton 迭代与总线性迭代也保持一致。
+
+\begin{table}[H]
+\centering
+\caption{PETSc/LU 与 PETSc/Krylov 的小规模 benchmark 对照}
+\label{tab:lu-vs-krylov}
+\small
+\begin{tabular}{llccccc}
+\toprule
+工况 & 线性求解 & final load & Newton iters & linear iters & reaction norm & max penetration \\
+\midrule
+baseline & LU & 0.06 & 9 & 9 & 0.014005056882432254 & 0.06003082899505898 \\
+baseline & Krylov & 0.06 & 9 & 9 & 0.014005056882432254 & 0.06003082899505898 \\
+\midrule
+aggressive & LU & 0.12 & 21 & 21 & 0.12471645522372300 & 0.12127179622886528 \\
+aggressive & Krylov & 0.12 & 21 & 21 & 0.12471645522372302 & 0.12127179622886528 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{stage_summary_reaction_load_curve.pdf}
+\caption{baseline 与 aggressive 两个工况下的 load--reaction 曲线。staggered、dense monolithic 和 PETSc/LU monolithic 在当前 benchmark 上给出几乎重合的接触响应。}
+\label{fig:stage-reaction}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{stage_summary_penetration_load_curve.pdf}
+\caption{baseline 与 aggressive 两个工况下的 load--maximum penetration 曲线。三条主路径在当前小规模 benchmark 上对最大压入量的预测基本一致。}
+\label{fig:stage-penetration}
+\end{figure}
+
+\subsection{代表性场结果展示}
+
+仅有“表格一致”还不足以说明当前算例的响应形态，因此还需要把代表性场结果直接画出来。图~\ref{fig:stage-field-profiles} 给出了当前小规模 benchmark 下的一组代表性结果：上排展示 monolithic/PETSc-LU 路径在 baseline 与 aggressive 两个工况下顶面的压入位移分布，下排给出顶面对角线上的压入 profile，并将冻结的 staggered baseline 与 monolithic 结果直接叠加比较。
+
+这组图把当前阶段最重要的数值事实可视化了。首先，baseline 到 aggressive 的变化并不是单纯的“数值更大”，而是顶面压入模式在保持对称性的同时整体增强，说明当前算例已经能够稳定反映载荷水平变化带来的接触响应差异。其次，staggered 与 monolithic 两条主路径在代表性剖线上几乎完全重合，这比单独列出 final reaction norm 或 max penetration 更直观地说明：当前 monolithic 路线不仅在终态标量上与冻结的 staggered baseline 对齐，而且在代表性位移场分布上也保持了一致的接触响应。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{stage_summary_field_profiles.pdf}
+\caption{代表性场结果展示。上排为 monolithic/PETSc-LU 路径在 baseline 与 aggressive 工况下的顶面压入位移分布；下排为顶面对角线上的压入 profile，其中 staggered 与 monolithic 曲线几乎重合。这张图直接展示了当前算例的响应形态，以及两条主求解路径在场层面的一致性。}
+\label{fig:stage-field-profiles}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{stage_summary_top_profile_baseline_vs_aggressive.pdf}
+\caption{baseline 与 aggressive 两个工况下顶面对角线压入 profile 的直接对比。该图强调了当前 benchmark 的主要物理现象：aggressive 工况下顶面中央区域压入更深，而 staggered 与 monolithic 对 profile 的预测仍保持几乎重合。}
+\label{fig:stage-top-profile}
+\end{figure}
+
+如果希望更直观地看到“块体到底是如何被压入的”，那么仅看顶面位移还不够。图~\ref{fig:stage-deformed-von-mises} 进一步给出了前表面在变形后构型下的轮廓，并直接叠加 von Mises 应力分布。与上面的位移 profile 相比，这张图更接近标准固体力学结果页：一方面能够看出 baseline 与 aggressive 下变形量级的差别，另一方面也能看出高应力区域如何集中在压入区域附近。由于这里直接在变形后轮廓上着色，因此“位移响应”和“应力水平”不再是两张分离的图，而是被放在同一张图里解释。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{stage_summary_deformed_von_mises.pdf}
+\caption{变形后前表面轮廓与 von Mises 应力叠加图。两幅图分别对应 baseline 与 aggressive 工况下 monolithic/PETSc-LU 的最终结果。虚线为未变形前轮廓，彩色区域为变形后构型上的 von Mises 应力分布。该图直接展示了压入后的几何形态和应力集中区域。}
+\label{fig:stage-deformed-von-mises}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{stage_summary_stress_strain_glyphs.pdf}
+\caption{弹性块体前表面（$y=0$）上的代表性应力/应变可视化。左图以 $\sigma_{zz}$ 为背景，并叠加主应力方向在 $x$-$z$ 平面内的投影；右图以 $\varepsilon_{zz}$ 为背景，并叠加主应变方向在 $x$-$z$ 平面内的投影。这里采用的是当前 aggressive 工况下 monolithic/PETSc-LU 解对应的线弹性后处理结果，用于直观展示压入过程中块体内部的主压缩方向与法向响应分布。}
+\label{fig:stage-stress-strain}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{stage_summary_stress_snapshots.pdf}
+\caption{aggressive 路径下三个代表性载荷时刻（$0.04$、$0.08$、$0.12$）的前表面 von Mises 应力云图。该图直接展示了压头逐步下压时应力水平的增长过程，以及高应力区域在前表面上的持续集中。}
+\label{fig:stage-stress-snapshots}
+\end{figure}
+
+关于“如何证明 SDF 也随着变形发生了相应更新”这一点，当前 flat-indenter benchmark 需要特别说明。这里使用的不是“当前构型中直接更新的欧氏 SDF”，而是定义在参考域中的 pull-back SDF。因此，在当前这个\textbf{刚性平面压头 + 近似平面接触面}的最小算例里，$\widehat{\phi}$ 的参考域 profile 几乎保持不变是正常现象，而不是没有更新。真正随变形演化的是由映射 $\chi$ 决定的当前构型几何：也就是说，\textbf{pull-back 标量场本身可以近似不变，但由它和位移场共同重构出的当前零水平集必须随构型一起移动}。
+
+图~\ref{fig:stage-phi-transport} 用一个更适合当前 benchmark 的方式把这个事实画出来。左图显示 aggressive 路径下三个代表性载荷时刻的 pull-back $\phi$ 纵向 profile，它们几乎重合；右图则显示相同路径下前表面顶部轮廓在当前构型中的位置，随着载荷增大而持续下移。这个对照恰好说明：在当前最小平面压入算例中，判断“SDF 是否正确跟随变形”的标准不应是“$\phi$ 数值是否明显变化”，而应是“由 $\widehat{\phi}$ 与位移映射共同确定的当前界面位置是否与变形后的接触面一致”。对当前算例来说，后一条已经由载荷路径、位移 profile、penetration 曲线和单调应力增长共同支持。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{stage_summary_phi_transport_consistency.pdf}
+\caption{pull-back SDF 与当前构型界面输运的一致性说明。左图为 aggressive 路径下三个代表性时刻的 pull-back $\widehat{\phi}$ 纵向 profile，在当前平面压入算例中几乎保持不变；右图为相同时刻前表面顶部轮廓在当前构型中的位置，随载荷持续下移。该图说明：在 pull-back 表述下，当前算例中真正随变形演化的是通过位移映射输运得到的空间界面位置，而不是参考域中的标量 profile 本身。}
+\label{fig:stage-phi-transport}
+\end{figure}
+
+\subsection{工程推进意义与下一步}
+
+当前阶段最值得强调的不是某一个单独公式，而是这条数值推进链条已经闭合：
+\begin{enumerate}[label=\arabic*)]
+    \item pull-back SDF 主方程、接触几何与接触切线已经完成局部严格数值验证；
+    \item assembled staggered baseline 已冻结，baseline/aggressive 两个工况都可稳定跑通；
+    \item dense monolithic 已在当前 benchmark 上跑通，并相较 staggered 使用更少的非线性迭代；
+    \item sparse/PETSc monolithic 已与 dense 在固定状态下达到机器精度等价；
+    \item PETSc/Krylov 路线已经接通，说明 monolithic 路线已开始从“可证明正确”转向“可扩展工程实现”。
+\end{enumerate}
+
+进一步地，作为近期工程推进的延伸，我们已经开始在更大网格和 block preconditioner 路径上做准备。图~\ref{fig:stage-linear-pc} 展示了当前小网格与更大网格（目前为 $4\times 4\times 4$ baseline）的线性迭代对比。对于当前问题规模，黑箱 GMRES+ILU 仍然是最稳、最省线性迭代的 Krylov 路径；而 multiplicative fieldsplit 已经接通并在更大网格上稳定收敛，但其线性迭代数尚未优于黑箱 ILU。这意味着下一阶段的重点不再是重新审查块系统语义，而应转向更成熟的 Schur / block triangular 预条件器以及更大网格验证。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{stage_summary_linear_iterations_block_pc.pdf}
+\caption{当前 Krylov/PC 路径在小网格与更大网格 baseline 上的线性迭代对比。结果表明 block-aware 路径已经接通，但仍需通过更成熟的 Schur 或 block triangular 预条件器进一步提升效率。}
+\label{fig:stage-linear-pc}
+\end{figure}
+
+因此，当前阶段可以用一句话概括：\textbf{本项目已经从局部公式验证走到冻结的系统级基线，并且将 monolithic 路线从 dense 推进到了 PETSc 与 Krylov 层面。} 对于近期组会汇报而言，这已经足以证明该路线不仅在理论上闭合，而且在数值实现与工程推进上已经进入可持续扩展的阶段。
 
 \section{讨论}\label{sec:discussion}
 

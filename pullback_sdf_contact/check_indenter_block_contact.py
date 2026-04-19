@@ -25,10 +25,24 @@ from solid.forms import solid_forms
 from solid.spaces import create_displacement_space
 
 
-def get_mode_config(mode):
+def get_mode_config(mode, mesh_scale="small", nx=None, ny=None, nz=None):
+    if mesh_scale == "small":
+        default_nx, default_ny, default_nz = 3, 3, 3
+    elif mesh_scale == "larger":
+        default_nx, default_ny, default_nz = 4, 4, 4
+    else:
+        raise ValueError(f"Unsupported mesh_scale: {mesh_scale}")
+    if nx is not None:
+        default_nx = int(nx)
+    if ny is not None:
+        default_ny = int(ny)
+    if nz is not None:
+        default_nz = int(nz)
+    mesh_cfg = MeshConfig(nx=default_nx, ny=default_ny, nz=default_nz)
+
     if mode == "baseline":
         return {
-            "mesh_cfg": MeshConfig(nx=3, ny=3, nz=3),
+            "mesh_cfg": mesh_cfg,
             "solid_cfg": SolidConfig(E=100.0, nu=0.3, body_force_z=0.0),
             "sdf_cfg": SDFConfig(beta=1e-6),
             "solver_cfg": SolverConfig(max_it=4, verbose=False),
@@ -40,7 +54,7 @@ def get_mode_config(mode):
         }
     if mode == "aggressive":
         return {
-            "mesh_cfg": MeshConfig(nx=3, ny=3, nz=3),
+            "mesh_cfg": mesh_cfg,
             "solid_cfg": SolidConfig(E=40.0, nu=0.3, body_force_z=0.0),
             "sdf_cfg": SDFConfig(beta=1e-6),
             "solver_cfg": SolverConfig(max_it=4, verbose=False),
@@ -53,8 +67,12 @@ def get_mode_config(mode):
     raise ValueError(f"Unsupported mode: {mode}")
 
 
-def build_indenter_state(mode):
-    mode_cfg = get_mode_config(mode)
+def mesh_resolution_string(mesh_cfg):
+    return f"{mesh_cfg.nx}x{mesh_cfg.ny}x{mesh_cfg.nz}"
+
+
+def build_indenter_state(mode, mesh_scale="small", nx=None, ny=None, nz=None):
+    mode_cfg = get_mode_config(mode, mesh_scale=mesh_scale, nx=nx, ny=ny, nz=nz)
     mesh_cfg = mode_cfg["mesh_cfg"]
     solid_cfg = mode_cfg["solid_cfg"]
     sdf_cfg = mode_cfg["sdf_cfg"]
@@ -103,12 +121,13 @@ def build_indenter_state(mode):
         "penalty": penalty,
         "slave_current_offset": np.zeros(3, dtype=np.float64),
         "current_load_value": 0.0,
+        "mesh_resolution": mesh_resolution_string(mesh_cfg),
     }
     return state, solver_cfg, mode_cfg
 
 
-def build_load_schedule(mode):
-    mode_cfg = get_mode_config(mode)
+def build_load_schedule(mode, mesh_scale="small", nx=None, ny=None, nz=None):
+    mode_cfg = get_mode_config(mode, mesh_scale=mesh_scale, nx=nx, ny=ny, nz=nz)
     return [
         {"step": i + 1, "load_value": float(value), "label": f"{mode}_indent_{i + 1}"}
         for i, value in enumerate(mode_cfg["load_values"])
