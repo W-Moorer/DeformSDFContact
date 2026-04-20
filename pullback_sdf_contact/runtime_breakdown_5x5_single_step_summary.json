@@ -1,0 +1,49 @@
+{
+  "mesh_resolution": "5x5x5",
+  "mode": "baseline",
+  "step": "first_nonzero_load_single_newton",
+  "rows": [
+    {
+      "assembly_time": 3.174495970999942,
+      "block_build_time": 524.2761467400001,
+      "block_pc_name": "global_ilu",
+      "final_max_penetration": 0.020000000000155824,
+      "final_reaction_norm": 0.0032598816648626767,
+      "final_residual_norm": 2.756991099047234e-05,
+      "ksp_reason": 3,
+      "label": "gmres_ilu",
+      "linear_iterations": 1,
+      "linear_solve_time": 0.37301560800005973,
+      "ndof_phi": 1331,
+      "ndof_u": 648,
+      "newton_iterations": 1,
+      "newton_step_walltime": 529.6225641760002,
+      "outer_residual_norm_after_linear": 2.756991099047234e-05,
+      "outer_residual_norm_before_linear": 0.0032599386497294677,
+      "pc_type": "ilu",
+      "relative_linear_reduction": 0.008457187067848742,
+      "state_update_time": 1.7987069460000384
+    },
+    {
+      "assembly_time": 0.968146139000055,
+      "block_build_time": 513.1700034389996,
+      "block_pc_name": "fieldsplit_schur_lower_selfp_ilu",
+      "final_max_penetration": 0.020000000000156167,
+      "final_reaction_norm": 0.003259881664862601,
+      "final_residual_norm": 2.7569911995818887e-05,
+      "ksp_reason": 3,
+      "label": "fieldsplit_schur_lower_selfp_ilu",
+      "linear_iterations": 2,
+      "linear_solve_time": 1.4733595200004856,
+      "ndof_phi": 1331,
+      "ndof_u": 648,
+      "newton_iterations": 1,
+      "newton_step_walltime": 516.2339967260004,
+      "outer_residual_norm_after_linear": 2.7569911995818887e-05,
+      "outer_residual_norm_before_linear": 0.0032599386497294677,
+      "pc_type": "fieldsplit",
+      "relative_linear_reduction": 0.008457187376243055,
+      "state_update_time": 0.622322661999533
+    }
+  ]
+}

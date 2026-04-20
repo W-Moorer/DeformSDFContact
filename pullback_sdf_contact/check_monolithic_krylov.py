@@ -11,6 +11,15 @@ from coupled_solver.monolithic import (
 )
 
 
+def _parse_bool(value):
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got {value!r}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "aggressive", "all"], default="baseline")
@@ -19,15 +28,23 @@ def main():
     parser.add_argument("--ny", type=int, default=None)
     parser.add_argument("--nz", type=int, default=None)
     parser.add_argument("--linear-solver", choices=["lu", "krylov"], required=True)
+    parser.add_argument("--build-path", choices=["current", "optimized", "all"], default="current")
     parser.add_argument("--ksp-type", default=None)
     parser.add_argument("--pc-type", default=None)
     parser.add_argument("--block-pc-name", default=None)
+    parser.add_argument("--reuse-ksp", type=_parse_bool, default=False)
+    parser.add_argument("--reuse-matrix-pattern", type=_parse_bool, default=False)
+    parser.add_argument("--reuse-fieldsplit-is", type=_parse_bool, default=False)
     parser.add_argument("--max-newton-iter", type=int, default=None)
     parser.add_argument("--line-search", choices=["on", "off"], default=None)
     parser.add_argument("--damping", type=float, default=None)
     parser.add_argument("--ksp-rtol", type=float, default=None)
     parser.add_argument("--ksp-atol", type=float, default=None)
     parser.add_argument("--ksp-max-it", type=int, default=None)
+    parser.add_argument("--max-load-steps", type=int, default=None)
+    parser.add_argument("--max-newton-steps", type=int, default=None)
+    parser.add_argument("--max-walltime-seconds", type=float, default=None)
+    parser.add_argument("--stop-after-first-nonzero-accepted-step", action="store_true")
     args = parser.parse_args()
 
     recommended = recommended_monolithic_contact_options()
@@ -67,11 +84,22 @@ def main():
     if args.nx is not None or args.ny is not None or args.nz is not None:
         print(f"mesh_override = ({args.nx}, {args.ny}, {args.nz})")
     print("backend = petsc_block")
+    print(f"build_path = {args.build_path}")
     print(f"linear_solver_mode = {args.linear_solver}")
     print(f"ksp_type = {resolved_ksp_type}")
     print(f"pc_type = {resolved_pc_type}")
     print(f"block_pc_name = {resolved_block_pc_name}")
     print(f"max_newton_iter = {resolved_max_newton_iter}")
+    print(f"max_load_steps = {args.max_load_steps}")
+    print(f"max_newton_steps = {args.max_newton_steps}")
+    print(f"max_walltime_seconds = {args.max_walltime_seconds}")
+    print(
+        f"stop_after_first_nonzero_accepted_step = "
+        f"{args.stop_after_first_nonzero_accepted_step}"
+    )
+    print(f"reuse_ksp = {args.reuse_ksp}")
+    print(f"reuse_matrix_pattern = {args.reuse_matrix_pattern}")
+    print(f"reuse_fieldsplit_is = {args.reuse_fieldsplit_is}")
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
     print("")
@@ -84,16 +112,24 @@ def main():
             ny=args.ny,
             nz=args.nz,
             backend="petsc_block",
+            build_path=args.build_path,
             linear_solver_mode=args.linear_solver,
             ksp_type=resolved_ksp_type,
             pc_type=resolved_pc_type,
             block_pc_name=resolved_block_pc_name,
+            reuse_ksp=args.reuse_ksp,
+            reuse_matrix_pattern=args.reuse_matrix_pattern,
+            reuse_fieldsplit_is=args.reuse_fieldsplit_is,
             ksp_rtol=resolved_ksp_rtol,
             ksp_atol=resolved_ksp_atol,
             ksp_max_it=resolved_ksp_max_it,
             max_newton_iter=resolved_max_newton_iter,
             line_search=resolved_line_search,
             damping=resolved_damping,
+            max_load_steps=args.max_load_steps,
+            max_newton_steps=args.max_newton_steps,
+            max_walltime_seconds=args.max_walltime_seconds,
+            stop_after_first_nonzero_accepted_step=args.stop_after_first_nonzero_accepted_step,
             write_outputs=True,
             verbose=False,
         )

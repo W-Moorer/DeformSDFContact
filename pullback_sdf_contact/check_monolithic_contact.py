@@ -18,6 +18,7 @@ def summarize_monolithic_result(
     result,
     mode,
     backend,
+    build_path,
     max_newton_iter,
     line_search,
     damping,
@@ -48,6 +49,21 @@ def summarize_monolithic_result(
     total_linear_iterations_attempts = int(
         sum(item.get("linear_iterations", 0) for item in result["attempt_history"])
     )
+    total_assembly_time_accepted = float(
+        sum(sum(item.get("assembly_time_list", [])) for item in accepted_history)
+    )
+    total_block_build_time_accepted = float(
+        sum(sum(item.get("block_build_time_list", [])) for item in accepted_history)
+    )
+    total_linear_solve_time_accepted = float(
+        sum(sum(item.get("linear_solve_time_list", [])) for item in accepted_history)
+    )
+    total_state_update_time_accepted = float(
+        sum(sum(item.get("state_update_time_list", [])) for item in accepted_history)
+    )
+    total_newton_step_walltime_accepted = float(
+        sum(sum(item.get("newton_step_walltime_list", [])) for item in accepted_history)
+    )
     per_newton_linear_iterations = []
     per_newton_ksp_reasons = []
     per_newton_outer_residual_before = []
@@ -73,6 +89,7 @@ def summarize_monolithic_result(
     return {
         "mode": mode,
         "backend": backend,
+        "build_path": build_path,
         "mesh_resolution": result.get("mesh_resolution", ""),
         "ndof_u": int(result.get("ndof_u", 0)),
         "ndof_phi": int(result.get("ndof_phi", 0)),
@@ -85,6 +102,7 @@ def summarize_monolithic_result(
         "terminated_early": result["terminated_early"],
         "termination_reason": result["termination_reason"],
         "accepted_step_count": result["accepted_step_count"],
+        "accepted_nonzero_step_count": int(result.get("accepted_nonzero_step_count", 0)),
         "attempt_count": result["attempt_count"],
         "total_newton_iterations_accepted": total_newton_iterations_accepted,
         "total_newton_iterations_attempts": total_newton_iterations_attempts,
@@ -100,6 +118,11 @@ def summarize_monolithic_result(
             if total_newton_iterations_accepted == 0
             else total_linear_iterations_accepted / total_newton_iterations_accepted
         ),
+        "total_assembly_time_accepted": total_assembly_time_accepted,
+        "total_block_build_time_accepted": total_block_build_time_accepted,
+        "total_linear_solve_time_accepted": total_linear_solve_time_accepted,
+        "total_state_update_time_accepted": total_state_update_time_accepted,
+        "total_newton_step_walltime_accepted": total_newton_step_walltime_accepted,
         "final_residual_norm": 0.0 if final_accepted is None else float(final_accepted["residual_norm"]),
         "final_reaction_norm": 0.0 if final_accepted is None else float(final_accepted["reaction_norm"]),
         "final_max_penetration": 0.0 if final_accepted is None else float(final_accepted["max_penetration"]),
@@ -111,6 +134,13 @@ def summarize_monolithic_result(
         "per_newton_outer_residual_before": per_newton_outer_residual_before,
         "per_newton_outer_residual_after": per_newton_outer_residual_after,
         "per_newton_relative_reduction": per_newton_relative_reduction,
+        "completed_full_run": bool(result.get("completed_full_run", False)),
+        "terminated_by_walltime": bool(result.get("terminated_by_walltime", False)),
+        "terminated_by_step_limit": bool(result.get("terminated_by_step_limit", False)),
+        "terminated_by_nonconvergence": bool(result.get("terminated_by_nonconvergence", False)),
+        "termination_category": result.get("termination_category", ""),
+        "total_walltime": float(result.get("total_walltime", 0.0)),
+        "total_newton_steps_used": int(result.get("total_newton_steps_used", 0)),
     }
 
 
@@ -122,10 +152,14 @@ def run_monolithic_case(
     ny=None,
     nz=None,
     backend=None,
+    build_path="current",
     linear_solver_mode=None,
     ksp_type=None,
     pc_type=None,
     block_pc_name=None,
+    reuse_ksp=False,
+    reuse_matrix_pattern=False,
+    reuse_fieldsplit_is=False,
     ksp_rtol=None,
     ksp_atol=None,
     ksp_max_it=None,
@@ -136,6 +170,11 @@ def run_monolithic_case(
     damping=None,
     max_backtracks=None,
     backtrack_factor=None,
+    max_load_steps=None,
+    max_newton_steps=None,
+    max_walltime_seconds=None,
+    stop_after_first_nonzero_accepted_step=False,
+    profile_assembly_detail=False,
     write_outputs=True,
     verbose=False,
 ):
@@ -180,10 +219,14 @@ def run_monolithic_case(
         solver_cfg,
         load_schedule,
         backend=backend,
+        build_path=build_path,
         linear_solver_mode=linear_solver_mode,
         ksp_type=ksp_type,
         pc_type=pc_type,
         block_pc_name=block_pc_name,
+        reuse_ksp=reuse_ksp,
+        reuse_matrix_pattern=reuse_matrix_pattern,
+        reuse_fieldsplit_is=reuse_fieldsplit_is,
         ksp_rtol=ksp_rtol,
         ksp_atol=ksp_atol,
         ksp_max_it=ksp_max_it,
@@ -199,11 +242,17 @@ def run_monolithic_case(
         history_path=history_path,
         verbose=verbose,
         min_cutback_increment=mode_cfg["min_cutback_increment"],
+        max_load_steps=max_load_steps,
+        max_newton_steps=max_newton_steps,
+        max_walltime_seconds=max_walltime_seconds,
+        stop_after_first_nonzero_accepted_step=stop_after_first_nonzero_accepted_step,
+        profile_assembly_detail=profile_assembly_detail,
     )
     summary = summarize_monolithic_result(
         result,
         mode,
         backend,
+        build_path,
         max_newton_iter,
         line_search,
         damping,
@@ -241,6 +290,7 @@ def print_case(result, summary):
     print(f"  ndof_phi = {summary['ndof_phi']}")
     print(f"  total_dofs = {summary['total_dofs']}")
     print(f"  backend = {summary['backend']}")
+    print(f"  build_path = {summary['build_path']}")
     print(f"  linear_solver_mode = {summary['linear_solver_mode']}")
     print(f"  ksp_type = {summary['ksp_type']}")
     print(f"  pc_type = {summary['pc_type']}")
@@ -253,12 +303,24 @@ def print_case(result, summary):
     print(f"  terminated_early = {summary['terminated_early']}")
     print(f"  termination_reason = {summary['termination_reason']}")
     print(f"  accepted_step_count = {summary['accepted_step_count']}")
+    print(f"  accepted_nonzero_step_count = {summary['accepted_nonzero_step_count']}")
     print(f"  attempt_count = {summary['attempt_count']}")
     print(f"  total_newton_iterations_accepted = {summary['total_newton_iterations_accepted']}")
     print(f"  total_newton_iterations_attempts = {summary['total_newton_iterations_attempts']}")
     print(f"  total_linear_iterations_accepted = {summary['total_linear_iterations_accepted']}")
     print(f"  total_linear_iterations_attempts = {summary['total_linear_iterations_attempts']}")
     print(f"  avg_linear_iterations_per_newton = {summary['avg_linear_iterations_per_newton']}")
+    print(f"  total_assembly_time_accepted = {summary['total_assembly_time_accepted']}")
+    print(f"  total_block_build_time_accepted = {summary['total_block_build_time_accepted']}")
+    print(f"  total_linear_solve_time_accepted = {summary['total_linear_solve_time_accepted']}")
+    print(f"  total_state_update_time_accepted = {summary['total_state_update_time_accepted']}")
+    print(f"  total_newton_step_walltime_accepted = {summary['total_newton_step_walltime_accepted']}")
+    print(f"  completed_full_run = {summary['completed_full_run']}")
+    print(f"  terminated_by_walltime = {summary['terminated_by_walltime']}")
+    print(f"  terminated_by_step_limit = {summary['terminated_by_step_limit']}")
+    print(f"  terminated_by_nonconvergence = {summary['terminated_by_nonconvergence']}")
+    print(f"  termination_category = {summary['termination_category']}")
+    print(f"  total_walltime = {summary['total_walltime']}")
     print(f"  cutback_count = {summary['cutback_count']}")
     print(f"  final_residual_norm = {summary['final_residual_norm']}")
     print(f"  final_reaction_norm = {summary['final_reaction_norm']}")
@@ -303,6 +365,10 @@ def main():
     parser.add_argument("--ksp-rtol", type=float, default=None)
     parser.add_argument("--ksp-atol", type=float, default=None)
     parser.add_argument("--ksp-max-it", type=int, default=None)
+    parser.add_argument("--max-load-steps", type=int, default=None)
+    parser.add_argument("--max-newton-steps", type=int, default=None)
+    parser.add_argument("--max-walltime-seconds", type=float, default=None)
+    parser.add_argument("--stop-after-first-nonzero-accepted-step", action="store_true")
     args = parser.parse_args()
 
     modes = ["baseline", "aggressive"] if args.mode == "all" else [args.mode]
@@ -341,6 +407,13 @@ def main():
     print(f"pc_type = {resolved_pc_type}")
     print(f"block_pc_name = {resolved_block_pc_name}")
     print(f"max_newton_iter = {resolved_max_newton_iter}")
+    print(f"max_load_steps = {args.max_load_steps}")
+    print(f"max_newton_steps = {args.max_newton_steps}")
+    print(f"max_walltime_seconds = {args.max_walltime_seconds}")
+    print(
+        f"stop_after_first_nonzero_accepted_step = "
+        f"{args.stop_after_first_nonzero_accepted_step}"
+    )
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
     print("")
@@ -362,6 +435,10 @@ def main():
             max_newton_iter=resolved_max_newton_iter,
             line_search=resolved_line_search,
             damping=resolved_damping,
+            max_load_steps=args.max_load_steps,
+            max_newton_steps=args.max_newton_steps,
+            max_walltime_seconds=args.max_walltime_seconds,
+            stop_after_first_nonzero_accepted_step=args.stop_after_first_nonzero_accepted_step,
             write_outputs=True,
             verbose=False,
         )

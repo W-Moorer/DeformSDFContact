@@ -1,4 +1,6 @@
 import csv
+import os
+import time
 import numpy as np
 
 from dolfinx import fem
@@ -66,6 +68,11 @@ def recommended_monolithic_contact_options(**overrides):
         "ksp_type": RECOMMENDED_MONOLITHIC_KSP_TYPE,
         "pc_type": RECOMMENDED_MONOLITHIC_PC_TYPE,
         "block_pc_name": RECOMMENDED_MONOLITHIC_BLOCK_PC_NAME,
+        "build_path": "current",
+        "reuse_ksp": False,
+        "reuse_matrix_pattern": False,
+        "reuse_fieldsplit_is": False,
+        "profile_assembly_detail": False,
         "ksp_rtol": RECOMMENDED_MONOLITHIC_KSP_RTOL,
         "ksp_atol": RECOMMENDED_MONOLITHIC_KSP_ATOL,
         "ksp_max_it": RECOMMENDED_MONOLITHIC_KSP_MAX_IT,
@@ -95,6 +102,11 @@ def _safe_enum_lookup(enum_cls, name, *, feature_name):
     )
 
 
+def _trace_reuse_stage(stage):
+    if os.environ.get("MONOLITHIC_REUSE_TRACE", "").strip():
+        print(f"[monolithic-reuse-trace] {stage}", flush=True)
+
+
 def _state_dof_layout(state):
     ndof_u = state["u"].vector.getLocalSize()
     ndof_phi = state["phi"].vector.getLocalSize()
@@ -112,6 +124,96 @@ def _compile_form(expr):
     return fem.Form(expr)
 
 
+def _get_or_create_phi_form_cache(state):
+    cache = state.get("_monolithic_phi_form_cache")
+    if cache is None:
+        cache = {
+            "R_phi_form": _compile_form(state["R_phi_form"]),
+            "K_phi_u_form": _compile_form(state["K_phi_u_form"]),
+            "K_phi_phi_form": _compile_form(state["K_phi_phi_form"]),
+        }
+        state["_monolithic_phi_form_cache"] = cache
+    return cache
+
+
+def _phi_profile_template():
+    return {
+        "phi_form_assembly_time": 0.0,
+        "phi_matrix_extract_time": 0.0,
+        "phi_matrix_convert_time": 0.0,
+        "phi_matrix_extract_or_convert_time": 0.0,
+        "phi_rhs_assembly_time": 0.0,
+        "phi_rhs_extract_time": 0.0,
+        "phi_rhs_extract_or_convert_time": 0.0,
+        "phi_dof_lookup_time": 0.0,
+        "phi_geometry_helper_time": 0.0,
+        "phi_basis_tabulation_time": 0.0,
+        "phi_form_call_count": 0,
+        "phi_form_cache_hit_count": 0,
+        "phi_form_cache_miss_count": 0,
+        "phi_matrix_extract_call_count": 0,
+        "phi_matrix_convert_call_count": 0,
+        "phi_rhs_extract_call_count": 0,
+        "phi_dof_lookup_call_count": 0,
+        "phi_basis_tabulation_call_count": 0,
+        "phi_residual_form_assembly_time": 0.0,
+        "phi_residual_extract_time": 0.0,
+        "phi_kphiu_form_assembly_time": 0.0,
+        "phi_kphiu_extract_time": 0.0,
+        "phi_kphiu_convert_time": 0.0,
+        "phi_kphiphi_form_assembly_time": 0.0,
+        "phi_kphiphi_extract_time": 0.0,
+        "phi_kphiphi_convert_time": 0.0,
+        "phi_residual_call_count": 0,
+        "phi_kphiu_call_count": 0,
+        "phi_kphiphi_call_count": 0,
+        "reused_phi_rhs_vec": False,
+        "reused_phi_kphiu_mat": False,
+        "reused_phi_kphiphi_mat": False,
+        "reused_phi_dense_buffers": False,
+    }
+
+
+def _merge_profile(target, updates):
+    for key, value in updates.items():
+        if isinstance(value, bool):
+            target[key] = bool(target.get(key, False) or value)
+        elif isinstance(value, int):
+            target[key] = int(target.get(key, 0) + value)
+        else:
+            target[key] = float(target.get(key, 0.0) + value)
+    return target
+
+
+def _get_or_create_phi_cache(state, profile=None):
+    cache = state.get("_monolithic_phi_cache")
+    if cache is None:
+        form_cache = _get_or_create_phi_form_cache(state)
+        R_phi_form = form_cache["R_phi_form"]
+        K_phi_u_form = form_cache["K_phi_u_form"]
+        K_phi_phi_form = form_cache["K_phi_phi_form"]
+        K_phi_u_mat = fem.create_matrix(K_phi_u_form)
+        K_phi_phi_mat = fem.create_matrix(K_phi_phi_form)
+        R_phi_vec = fem.create_vector(R_phi_form)
+        ndof_phi = state["phi"].vector.getLocalSize()
+        ndof_u = state["u"].vector.getLocalSize()
+        cache = {
+            **form_cache,
+            "R_phi_vec": R_phi_vec,
+            "K_phi_u_mat": K_phi_u_mat,
+            "K_phi_phi_mat": K_phi_phi_mat,
+            "J_phiu_dense": np.zeros((ndof_phi, ndof_u), dtype=np.float64),
+            "J_phiphi_dense": np.zeros((ndof_phi, ndof_phi), dtype=np.float64),
+        }
+        state["_monolithic_phi_cache"] = cache
+        if profile is not None:
+            profile["phi_form_cache_miss_count"] += 3
+    else:
+        if profile is not None:
+            profile["phi_form_cache_hit_count"] += 3
+    return cache
+
+
 def _assemble_vector_array(form_expr):
     compiled = _compile_form(form_expr)
     vec = fem.assemble_vector(compiled)
@@ -124,6 +226,47 @@ def _assemble_matrix_dense(form_expr):
     mat = fem.assemble_matrix(compiled)
     mat.assemble()
     return dense_array_from_petsc_mat(mat)
+
+
+def _assemble_vector_array_compiled(compiled_form):
+    vec = fem.assemble_vector(compiled_form)
+    vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    return vec.array.copy()
+
+
+def _assemble_matrix_dense_compiled(compiled_form):
+    mat = fem.assemble_matrix(compiled_form)
+    mat.assemble()
+    return dense_array_from_petsc_mat(mat)
+
+
+def _assemble_vector_array_compiled_reuse(vec, compiled_form):
+    with vec.localForm() as vec_local:
+        vec_local.set(0.0)
+    fem.assemble_vector(vec, compiled_form)
+    vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    return vec.array.copy()
+
+
+def _dense_from_csr(mat, *, dense_buffer):
+    extract_t0 = time.perf_counter()
+    indptr, indices, values = mat.getValuesCSR()
+    extract_time = time.perf_counter() - extract_t0
+    convert_t0 = time.perf_counter()
+    dense_buffer.fill(0.0)
+    for row in range(len(indptr) - 1):
+        row_start = indptr[row]
+        row_end = indptr[row + 1]
+        dense_buffer[row, indices[row_start:row_end]] = values[row_start:row_end]
+    convert_time = time.perf_counter() - convert_t0
+    return dense_buffer, float(extract_time), float(convert_time)
+
+
+def _assemble_matrix_dense_compiled_reuse(mat, compiled_form, *, dense_buffer):
+    mat.zeroEntries()
+    fem.assemble_matrix(mat, compiled_form)
+    mat.assemble()
+    return _dense_from_csr(mat, dense_buffer=dense_buffer)
 
 
 def _snapshot_state_fields(state):
@@ -185,6 +328,7 @@ def _write_history_csv(history, history_path):
         "load_increment",
         "converged",
         "backend",
+        "build_path",
         "linear_solver_mode",
         "ksp_type",
         "pc_type",
@@ -195,6 +339,57 @@ def _write_history_csv(history, history_path):
         "outer_residual_norm_before_linear",
         "outer_residual_norm_after_linear",
         "relative_linear_reduction",
+        "assembly_time",
+        "struct_block_assembly_time",
+        "contact_block_assembly_time",
+        "phi_block_assembly_time",
+        "contact_quadrature_loop_time",
+        "contact_geometry_eval_time",
+        "contact_query_time",
+        "contact_gap_normal_eval_time",
+        "contact_active_filter_time",
+        "contact_local_residual_time",
+        "contact_local_tangent_uu_time",
+        "contact_local_tangent_uphi_time",
+        "contact_geometry_eval_call_count",
+        "contact_geometry_eval_avg_time",
+        "contact_query_avg_time",
+        "contact_query_call_count",
+        "contact_query_cache_hit_count",
+        "contact_query_cache_miss_count",
+        "contact_sensitivity_call_count",
+        "contact_sensitivity_cache_hit_count",
+        "contact_sensitivity_cache_miss_count",
+        "contact_sensitivity_time",
+        "contact_sensitivity_avg_time",
+        "contact_local_tangent_uphi_call_count",
+        "contact_local_tangent_uu_call_count",
+        "cell_geometry_cache_hit_count",
+        "cell_geometry_cache_miss_count",
+        "function_cell_dof_cache_hit_count",
+        "function_cell_dof_cache_miss_count",
+        "vector_subfunction_cache_hit_count",
+        "vector_subfunction_cache_miss_count",
+        "contact_scatter_to_global_time",
+        "phi_form_assembly_time",
+        "phi_matrix_extract_or_convert_time",
+        "phi_rhs_extract_or_convert_time",
+        "dofmap_lookup_time",
+        "surface_entity_iteration_time",
+        "basis_eval_or_tabulation_time",
+        "numpy_temp_allocation_time",
+        "block_build_time",
+        "bc_elimination_time",
+        "global_matrix_allocation_time",
+        "global_matrix_fill_time",
+        "global_rhs_build_time",
+        "petsc_object_setup_time",
+        "ksp_setup_time",
+        "ksp_solve_time",
+        "linear_solve_time",
+        "state_update_time",
+        "newton_step_walltime",
+        "load_step_walltime",
         "newton_iterations",
         "residual_norm",
         "increment_norm",
@@ -205,11 +400,74 @@ def _write_history_csv(history, history_path):
         "mesh_resolution",
         "ndof_u",
         "ndof_phi",
+        "nnz_global",
+        "nnz_Juu",
+        "nnz_Juphi",
+        "nnz_Jphiu",
+        "nnz_Jphiphi",
+        "reused_global_matrix",
+        "reused_global_rhs_vec",
+        "reused_ksp",
+        "reused_fieldsplit_is",
+        "reused_subksp",
+        "reuse_attempted",
+        "reuse_failed_stage",
+        "reuse_failure_message",
         "linear_iterations_list",
         "ksp_reason_list",
         "outer_residual_norm_before_linear_list",
         "outer_residual_norm_after_linear_list",
         "relative_linear_reduction_list",
+        "assembly_time_list",
+        "struct_block_assembly_time_list",
+        "contact_block_assembly_time_list",
+        "phi_block_assembly_time_list",
+        "contact_quadrature_loop_time_list",
+        "contact_geometry_eval_time_list",
+        "contact_query_time_list",
+        "contact_gap_normal_eval_time_list",
+        "contact_active_filter_time_list",
+        "contact_local_residual_time_list",
+        "contact_local_tangent_uu_time_list",
+        "contact_local_tangent_uphi_time_list",
+        "contact_geometry_eval_call_count_list",
+        "contact_geometry_eval_avg_time_list",
+        "contact_query_avg_time_list",
+        "contact_query_call_count_list",
+        "contact_query_cache_hit_count_list",
+        "contact_query_cache_miss_count_list",
+        "contact_sensitivity_call_count_list",
+        "contact_sensitivity_cache_hit_count_list",
+        "contact_sensitivity_cache_miss_count_list",
+        "contact_sensitivity_time_list",
+        "contact_sensitivity_avg_time_list",
+        "contact_local_tangent_uphi_call_count_list",
+        "contact_local_tangent_uu_call_count_list",
+        "cell_geometry_cache_hit_count_list",
+        "cell_geometry_cache_miss_count_list",
+        "function_cell_dof_cache_hit_count_list",
+        "function_cell_dof_cache_miss_count_list",
+        "vector_subfunction_cache_hit_count_list",
+        "vector_subfunction_cache_miss_count_list",
+        "contact_scatter_to_global_time_list",
+        "phi_form_assembly_time_list",
+        "phi_matrix_extract_or_convert_time_list",
+        "phi_rhs_extract_or_convert_time_list",
+        "dofmap_lookup_time_list",
+        "surface_entity_iteration_time_list",
+        "basis_eval_or_tabulation_time_list",
+        "numpy_temp_allocation_time_list",
+        "block_build_time_list",
+        "bc_elimination_time_list",
+        "global_matrix_allocation_time_list",
+        "global_matrix_fill_time_list",
+        "global_rhs_build_time_list",
+        "petsc_object_setup_time_list",
+        "ksp_setup_time_list",
+        "ksp_solve_time_list",
+        "linear_solve_time_list",
+        "state_update_time_list",
+        "newton_step_walltime_list",
         "cutback_level",
         "step_length",
         "cutback_triggered",
@@ -246,6 +504,64 @@ def _write_history_csv(history, history_path):
                 row["relative_linear_reduction_list"] = "|".join(
                     f"{value:.16e}" for value in row["relative_linear_reduction_list"]
                 )
+            for key in (
+                "assembly_time_list",
+                "struct_block_assembly_time_list",
+                "contact_block_assembly_time_list",
+                "phi_block_assembly_time_list",
+                "contact_quadrature_loop_time_list",
+                "contact_geometry_eval_time_list",
+                "contact_query_time_list",
+                "contact_gap_normal_eval_time_list",
+                "contact_active_filter_time_list",
+                "contact_local_residual_time_list",
+                "contact_local_tangent_uu_time_list",
+                "contact_local_tangent_uphi_time_list",
+                "contact_geometry_eval_avg_time_list",
+                "contact_query_avg_time_list",
+                "contact_scatter_to_global_time_list",
+                "phi_form_assembly_time_list",
+                "phi_matrix_extract_or_convert_time_list",
+                "phi_rhs_extract_or_convert_time_list",
+                "dofmap_lookup_time_list",
+                "surface_entity_iteration_time_list",
+                "basis_eval_or_tabulation_time_list",
+                "numpy_temp_allocation_time_list",
+                "block_build_time_list",
+                "bc_elimination_time_list",
+                "global_matrix_allocation_time_list",
+                "global_matrix_fill_time_list",
+                "global_rhs_build_time_list",
+                "petsc_object_setup_time_list",
+                "ksp_setup_time_list",
+                "ksp_solve_time_list",
+                "linear_solve_time_list",
+                "state_update_time_list",
+                "newton_step_walltime_list",
+            ):
+                if isinstance(row.get(key), list):
+                    row[key] = "|".join(f"{value:.16e}" for value in row[key])
+            for key in (
+                "contact_geometry_eval_call_count_list",
+                "contact_query_call_count_list",
+                "contact_query_cache_hit_count_list",
+                "contact_query_cache_miss_count_list",
+                "contact_sensitivity_call_count_list",
+                "contact_sensitivity_cache_hit_count_list",
+                "contact_sensitivity_cache_miss_count_list",
+                "contact_sensitivity_time_list",
+                "contact_sensitivity_avg_time_list",
+                "contact_local_tangent_uphi_call_count_list",
+                "contact_local_tangent_uu_call_count_list",
+                "cell_geometry_cache_hit_count_list",
+                "cell_geometry_cache_miss_count_list",
+                "function_cell_dof_cache_hit_count_list",
+                "function_cell_dof_cache_miss_count_list",
+                "vector_subfunction_cache_hit_count_list",
+                "vector_subfunction_cache_miss_count_list",
+            ):
+                if isinstance(row.get(key), list):
+                    row[key] = "|".join(str(int(value)) for value in row[key])
             writer.writerow(row)
 
 
@@ -273,11 +589,18 @@ def _summarize_loadpath_result(
         "termination_reason": termination_reason,
         "attempt_count": len(attempt_history),
         "accepted_step_count": len(accepted_history),
+        "accepted_nonzero_step_count": sum(
+            1 for item in accepted_history if abs(float(item["load_value"])) > 1e-14
+        ),
     }
 
 
 def _current_state_vector(state):
     return np.concatenate([state["u"].vector.array_r.copy(), state["phi"].vector.array_r.copy()])
+
+
+def _nnz_dense(matrix):
+    return int(np.count_nonzero(np.asarray(matrix)))
 
 
 def _apply_state_increment(state, delta_u, delta_phi, scale=1.0):
@@ -314,7 +637,88 @@ def _create_petsc_aij_from_dense(matrix, comm):
     return mat
 
 
-def _configure_ksp_for_fieldsplit(solver, A, ndof_u, ndof_phi, *, block_pc_name):
+def _fill_petsc_vec_from_array(vec, array):
+    arr = vec.getArray()
+    arr[:] = np.asarray(array, dtype=np.float64)
+    vec.assemblyBegin()
+    vec.assemblyEnd()
+
+
+def _fill_petsc_aij_from_dense(mat, matrix, rows):
+    mat.zeroEntries()
+    mat.setValues(rows, rows, np.asarray(matrix, dtype=np.float64))
+    mat.assemble()
+
+
+def _build_cache_key(state, *, linear_solver_mode, ksp_type, pc_type, block_pc_name):
+    dof_layout = _state_dof_layout(state)
+    return (
+        dof_layout["mesh_resolution"],
+        dof_layout["ndof_u"],
+        dof_layout["ndof_phi"],
+        linear_solver_mode,
+        ksp_type,
+        pc_type,
+        block_pc_name,
+    )
+
+
+def _get_or_create_build_cache(
+    state,
+    *,
+    linear_solver_mode,
+    ksp_type,
+    pc_type,
+    block_pc_name,
+):
+    cache_store = state.setdefault("_monolithic_build_cache", {})
+    key = _build_cache_key(
+        state,
+        linear_solver_mode=linear_solver_mode,
+        ksp_type=ksp_type,
+        pc_type=pc_type,
+        block_pc_name=block_pc_name,
+    )
+    cache = cache_store.get(key)
+    created = False
+    if cache is None:
+        dof_layout = _state_dof_layout(state)
+        total_dofs = dof_layout["total_dofs"]
+        rows = np.arange(total_dofs, dtype=np.int32)
+        comm = state["domain"].mpi_comm()
+        mat = PETSc.Mat().createAIJ([total_dofs, total_dofs], nnz=total_dofs, comm=comm)
+        mat.setUp()
+        rhs = PETSc.Vec().createSeq(total_dofs, comm=comm)
+        u_is = PETSc.IS().createGeneral(np.arange(dof_layout["ndof_u"], dtype=np.int32), comm=comm)
+        phi_is = PETSc.IS().createGeneral(
+            np.arange(dof_layout["ndof_u"], total_dofs, dtype=np.int32), comm=comm
+        )
+        cache = {
+            "rows": rows,
+            "global_jacobian_dense": np.zeros((total_dofs, total_dofs), dtype=np.float64),
+            "global_residual_array": np.zeros(total_dofs, dtype=np.float64),
+            "global_jacobian_mat": mat,
+            "global_residual_vec": rhs,
+            "u_is": u_is,
+            "phi_is": phi_is,
+            "ksp": None,
+            "subksps_initialized": False,
+        }
+        cache_store[key] = cache
+        created = True
+    return cache, created
+
+
+def _configure_ksp_for_fieldsplit(
+    solver,
+    A,
+    ndof_u,
+    ndof_phi,
+    *,
+    block_pc_name,
+    u_is=None,
+    phi_is=None,
+):
     if block_pc_name not in BLOCK_PC_CONFIGS:
         raise ValueError(
             f"Unsupported block_pc_name: {block_pc_name}. "
@@ -349,10 +753,12 @@ def _configure_ksp_for_fieldsplit(solver, A, ndof_u, ndof_phi, *, block_pc_name)
             )
         )
     comm = A.getComm()
-    u_is = PETSc.IS().createGeneral(np.arange(ndof_u, dtype=np.int32), comm=comm)
-    phi_is = PETSc.IS().createGeneral(
-        np.arange(ndof_u, ndof_u + ndof_phi, dtype=np.int32), comm=comm
-    )
+    if u_is is None:
+        u_is = PETSc.IS().createGeneral(np.arange(ndof_u, dtype=np.int32), comm=comm)
+    if phi_is is None:
+        phi_is = PETSc.IS().createGeneral(
+            np.arange(ndof_u, ndof_u + ndof_phi, dtype=np.int32), comm=comm
+        )
     pc.setFieldSplitIS(("u", u_is), ("phi", phi_is))
     solver.setUp()
     subksps = pc.getFieldSplitSubKSP()
@@ -375,41 +781,99 @@ def _solve_petsc_linear_system(
     ksp_type="gmres",
     pc_type="fieldsplit",
     block_pc_name="fieldsplit_additive_ilu",
+    reuse_context=None,
+    reuse_ksp=False,
+    reuse_fieldsplit_is=False,
     ksp_rtol=1e-10,
     ksp_atol=1e-12,
     ksp_max_it=400,
 ):
+    ksp_setup_t0 = time.perf_counter()
+    reused_ksp = False
+    reused_fieldsplit_is = False
+    reused_subksp = False
+    reuse_attempted = bool(reuse_context is not None and (reuse_ksp or reuse_fieldsplit_is))
+    reuse_failed_stage = ""
+    reuse_failure_message = ""
     x = rhs.duplicate()
     x.set(0.0)
-    solver = PETSc.KSP().create(A.getComm())
-    solver.setOperators(A)
-    if linear_solver_mode == "lu":
-        solver.setType("preonly")
-        solver.getPC().setType("lu")
-        resolved_ksp_type = "preonly"
-        resolved_pc_type = "lu"
-        resolved_block_pc_name = "global_lu"
-    elif linear_solver_mode == "krylov":
-        solver.setType(ksp_type)
-        solver.setTolerances(rtol=float(ksp_rtol), atol=float(ksp_atol), max_it=int(ksp_max_it))
-        pc = solver.getPC()
-        resolved_ksp_type = ksp_type
-        resolved_pc_type = pc_type
-        if pc_type == "fieldsplit":
-            resolved_block_pc_name = block_pc_name
-            _configure_ksp_for_fieldsplit(
-                solver,
-                A,
-                ndof_u,
-                ndof_phi,
-                block_pc_name=block_pc_name,
-            )
+
+    try:
+        if reuse_context is not None and reuse_ksp and reuse_context.get("ksp") is not None:
+            reuse_failed_stage = "setOperators"
+            solver = reuse_context["ksp"]
+            _trace_reuse_stage("before_setOperators_reuse")
+            solver.setOperators(A)
+            _trace_reuse_stage("after_setOperators_reuse")
+            reused_ksp = True
+            reused_fieldsplit_is = bool(reuse_context.get("fieldsplit_is_initialized", False))
+            reused_subksp = bool(reuse_context.get("subksps_initialized", False))
         else:
-            pc.setType(pc_type)
-            resolved_block_pc_name = f"global_{pc_type}"
-    else:
-        raise ValueError(f"Unsupported linear_solver_mode: {linear_solver_mode}")
+            solver = PETSc.KSP().create(A.getComm())
+            reuse_failed_stage = "setOperators"
+            _trace_reuse_stage("before_setOperators_new")
+            solver.setOperators(A)
+            _trace_reuse_stage("after_setOperators_new")
+
+        if linear_solver_mode == "lu":
+            solver.setType("preonly")
+            solver.getPC().setType("lu")
+            resolved_ksp_type = "preonly"
+            resolved_pc_type = "lu"
+            resolved_block_pc_name = "global_lu"
+        elif linear_solver_mode == "krylov":
+            solver.setType(ksp_type)
+            solver.setTolerances(rtol=float(ksp_rtol), atol=float(ksp_atol), max_it=int(ksp_max_it))
+            pc = solver.getPC()
+            resolved_ksp_type = ksp_type
+            resolved_pc_type = pc_type
+            if pc_type == "fieldsplit":
+                resolved_block_pc_name = block_pc_name
+                reuse_failed_stage = "configure_fieldsplit"
+                _trace_reuse_stage("before_configure_fieldsplit")
+                _configure_ksp_for_fieldsplit(
+                    solver,
+                    A,
+                    ndof_u,
+                    ndof_phi,
+                    block_pc_name=block_pc_name,
+                    u_is=(
+                        None
+                        if reuse_context is None or not reuse_fieldsplit_is
+                        else reuse_context.get("u_is")
+                    ),
+                    phi_is=(
+                        None
+                        if reuse_context is None or not reuse_fieldsplit_is
+                        else reuse_context.get("phi_is")
+                    ),
+                )
+                _trace_reuse_stage("after_configure_fieldsplit")
+                if reuse_context is not None and reuse_fieldsplit_is:
+                    reuse_context["fieldsplit_is_initialized"] = True
+                    reused_fieldsplit_is = True
+                if reuse_context is not None and reuse_ksp:
+                    reuse_context["subksps_initialized"] = True
+                    reused_subksp = True
+            else:
+                pc.setType(pc_type)
+                resolved_block_pc_name = f"global_{pc_type}"
+        else:
+            raise ValueError(f"Unsupported linear_solver_mode: {linear_solver_mode}")
+    except Exception as exc:
+        reuse_failure_message = str(exc)
+        raise
+    ksp_setup_time = time.perf_counter() - ksp_setup_t0
+
+    if reuse_context is not None and reuse_ksp:
+        reuse_context["ksp"] = solver
+
+    ksp_solve_t0 = time.perf_counter()
+    reuse_failed_stage = "solve"
+    _trace_reuse_stage("before_solve")
     solver.solve(rhs, x)
+    _trace_reuse_stage("after_solve")
+    ksp_solve_time = time.perf_counter() - ksp_solve_t0
     info = {
         "linear_solver_mode": linear_solver_mode,
         "ksp_type": resolved_ksp_type,
@@ -418,48 +882,179 @@ def _solve_petsc_linear_system(
         "linear_iterations": int(solver.getIterationNumber()),
         "ksp_reason": int(solver.getConvergedReason()),
         "linear_converged": int(solver.getConvergedReason()) > 0,
+        "ksp_setup_time": float(ksp_setup_time),
+        "ksp_solve_time": float(ksp_solve_time),
+        "reused_ksp": bool(reused_ksp),
+        "reused_fieldsplit_is": bool(reused_fieldsplit_is),
+        "reused_subksp": bool(reused_subksp),
+        "reuse_attempted": bool(reuse_attempted),
+        "reuse_failed_stage": reuse_failed_stage if reuse_failure_message else "",
+        "reuse_failure_message": reuse_failure_message,
     }
     return x.getArray().copy(), solver, info
 
 
-def _dense_block_system_from_blocks(state, assembled):
+def _dense_block_system_from_blocks(state, assembled, *, dense_matrix=None, residual_array=None):
     ndof_u = state["u"].vector.getLocalSize()
     ndof_phi = state["phi"].vector.getLocalSize()
-    residual = np.concatenate([assembled["R_u_total"], assembled["R_phi_total"]])
-    J = np.zeros((ndof_u + ndof_phi, ndof_u + ndof_phi), dtype=np.float64)
+    if residual_array is None:
+        residual = np.concatenate([assembled["R_u_total"], assembled["R_phi_total"]])
+    else:
+        residual = residual_array
+        residual[:ndof_u] = assembled["R_u_total"]
+        residual[ndof_u:] = assembled["R_phi_total"]
+    if dense_matrix is None:
+        J = np.zeros((ndof_u + ndof_phi, ndof_u + ndof_phi), dtype=np.float64)
+    else:
+        J = dense_matrix
+        J.fill(0.0)
     J[:ndof_u, :ndof_u] = assembled["J_uu"]
     J[:ndof_u, ndof_u:] = assembled["J_uphi"]
     J[ndof_u:, :ndof_u] = assembled["J_phiu"]
     J[ndof_u:, ndof_u:] = assembled["J_phiphi"]
 
     current_values = _current_state_vector(state)
+    bc_t0 = time.perf_counter()
     _apply_block_dirichlet(J, residual, current_values, assembled["u_constrained_dofs"])
     _apply_block_dirichlet(
         J, residual, current_values, ndof_u + assembled["phi_constrained_dofs"]
     )
-    return J, residual
+    bc_elimination_time = time.perf_counter() - bc_t0
+    return J, residual, float(bc_elimination_time)
 
 
-def _assemble_global_backend_objects(state, assembled, backend):
-    global_jacobian_dense, global_residual_array = _dense_block_system_from_blocks(state, assembled)
+def _assemble_global_backend_objects(
+    state,
+    assembled,
+    backend,
+    *,
+    build_path="current",
+    linear_solver_mode="lu",
+    ksp_type="gmres",
+    pc_type="fieldsplit",
+    block_pc_name="fieldsplit_additive_ilu",
+    reuse_matrix_pattern=False,
+    reuse_fieldsplit_is=False,
+):
+    global_matrix_allocation_time = 0.0
+    global_matrix_fill_time = 0.0
+    global_rhs_build_time = 0.0
+    petsc_object_setup_time = 0.0
+    reused_global_matrix = False
+    reused_global_rhs_vec = False
+    reused_fieldsplit_is = False
+
+    if build_path == "optimized" and backend == "petsc_block" and (
+        reuse_matrix_pattern or reuse_fieldsplit_is
+    ):
+        setup_t0 = time.perf_counter()
+        cache, created = _get_or_create_build_cache(
+            state,
+            linear_solver_mode=linear_solver_mode,
+            ksp_type=ksp_type,
+            pc_type=pc_type,
+            block_pc_name=block_pc_name,
+        )
+        petsc_object_setup_time = time.perf_counter() - setup_t0
+        reused_global_matrix = bool(reuse_matrix_pattern and not created)
+        reused_global_rhs_vec = bool(reuse_matrix_pattern and not created)
+        reused_fieldsplit_is = bool(cache.get("fieldsplit_is_initialized", False))
+
+        rhs_t0 = time.perf_counter()
+        global_jacobian_dense, global_residual_array, bc_elimination_time = _dense_block_system_from_blocks(
+            state,
+            assembled,
+            dense_matrix=cache["global_jacobian_dense"] if reuse_matrix_pattern else None,
+            residual_array=cache["global_residual_array"] if reuse_matrix_pattern else None,
+        )
+        global_rhs_build_time = time.perf_counter() - rhs_t0
+        out = {
+            "global_jacobian_dense": global_jacobian_dense,
+            "global_residual_array": global_residual_array,
+            "global_jacobian_mat": None,
+            "global_residual_vec": None,
+            "bc_elimination_time": float(bc_elimination_time),
+            "global_matrix_allocation_time": float(global_matrix_allocation_time),
+            "global_matrix_fill_time": float(global_matrix_fill_time),
+            "global_rhs_build_time": float(global_rhs_build_time),
+            "petsc_object_setup_time": float(petsc_object_setup_time),
+            "reused_global_matrix": bool(reused_global_matrix),
+            "reused_global_rhs_vec": bool(reused_global_rhs_vec),
+            "reused_fieldsplit_is": bool(reused_fieldsplit_is),
+            "reuse_context": cache,
+        }
+        if reuse_matrix_pattern:
+            mat_fill_t0 = time.perf_counter()
+            _fill_petsc_aij_from_dense(cache["global_jacobian_mat"], global_jacobian_dense, cache["rows"])
+            global_matrix_fill_time = time.perf_counter() - mat_fill_t0
+            rhs_fill_t0 = time.perf_counter()
+            _fill_petsc_vec_from_array(cache["global_residual_vec"], global_residual_array)
+            global_rhs_build_time += time.perf_counter() - rhs_fill_t0
+            out["global_jacobian_mat"] = cache["global_jacobian_mat"]
+            out["global_residual_vec"] = cache["global_residual_vec"]
+        else:
+            alloc_t0 = time.perf_counter()
+            out["global_jacobian_mat"] = _create_petsc_aij_from_dense(global_jacobian_dense, state["domain"].mpi_comm())
+            out["global_residual_vec"] = _create_petsc_vec_from_array(global_residual_array, state["domain"].mpi_comm())
+            alloc_elapsed = time.perf_counter() - alloc_t0
+            global_matrix_allocation_time = float(alloc_elapsed)
+            global_matrix_fill_time = float(alloc_elapsed)
+        out["global_matrix_fill_time"] = float(global_matrix_fill_time)
+        out["global_rhs_build_time"] = float(global_rhs_build_time)
+        return out
+
+    dense_t0 = time.perf_counter()
+    global_jacobian_dense, global_residual_array, bc_elimination_time = _dense_block_system_from_blocks(
+        state, assembled
+    )
+    global_rhs_build_time = time.perf_counter() - dense_t0
     out = {
         "global_jacobian_dense": global_jacobian_dense,
         "global_residual_array": global_residual_array,
         "global_jacobian_mat": None,
         "global_residual_vec": None,
+        "bc_elimination_time": float(bc_elimination_time),
+        "global_matrix_allocation_time": float(global_matrix_allocation_time),
+        "global_matrix_fill_time": float(global_matrix_fill_time),
+        "global_rhs_build_time": float(global_rhs_build_time),
+        "petsc_object_setup_time": float(petsc_object_setup_time),
+        "reused_global_matrix": False,
+        "reused_global_rhs_vec": False,
+        "reused_fieldsplit_is": False,
+        "reuse_context": None,
     }
     if backend == "petsc_block":
         comm = state["domain"].mpi_comm()
+        alloc_t0 = time.perf_counter()
         out["global_jacobian_mat"] = _create_petsc_aij_from_dense(global_jacobian_dense, comm)
         out["global_residual_vec"] = _create_petsc_vec_from_array(global_residual_array, comm)
+        alloc_elapsed = time.perf_counter() - alloc_t0
+        out["global_matrix_allocation_time"] = float(alloc_elapsed)
+        out["global_matrix_fill_time"] = float(alloc_elapsed)
+        out["global_rhs_build_time"] = float(global_rhs_build_time)
     elif backend != "dense":
         raise ValueError(f"Unsupported monolithic backend: {backend}")
     return out
 
 
-def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jacobian=True):
+def assemble_monolithic_contact_system(
+    state,
+    cfg,
+    *,
+    backend="dense",
+    need_jacobian=True,
+    build_path="current",
+    linear_solver_mode="lu",
+    ksp_type="gmres",
+    pc_type="fieldsplit",
+    block_pc_name="fieldsplit_additive_ilu",
+    reuse_matrix_pattern=False,
+    reuse_fieldsplit_is=False,
+    profile_assembly_detail=False,
+):
     """Assemble the monolithic block residual and Jacobian."""
     dof_layout = _state_dof_layout(state)
+    struct_t0 = time.perf_counter()
     A_struct, b_struct, solid_meta = assemble_linear_solid_system(
         state["u"],
         state["R_u_form"],
@@ -472,7 +1067,9 @@ def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jaco
     J_uu_struct = dense_array_from_petsc_mat(A_struct)
     u_vec = state["u"].vector.array_r.copy()
     R_u_struct = J_uu_struct.dot(u_vec) - b_struct.array.copy()
+    struct_block_assembly_time = time.perf_counter() - struct_t0
 
+    contact_t0 = time.perf_counter()
     contact = assemble_contact_contributions_surface(
         state["quadrature_points"],
         state,
@@ -481,12 +1078,45 @@ def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jaco
         need_tangent_uu=need_jacobian,
         need_tangent_uphi=need_jacobian,
         need_diagnostics=True,
+        build_path=build_path,
+        profile_assembly_detail=profile_assembly_detail,
     )
+    contact_block_assembly_time = time.perf_counter() - contact_t0
+
+    phi_t0 = time.perf_counter()
     R_u_total = R_u_struct - contact["R_u_c"]
-    R_phi_total = _assemble_vector_array(state["R_phi_form"])
+    phi_profile = _phi_profile_template()
+    phi_cache = _get_or_create_phi_cache(state, profile=phi_profile) if build_path == "optimized" else None
+    compiled_R_phi = state["R_phi_form"] if phi_cache is None else phi_cache["R_phi_form"]
+    rhs_assemble_t0 = time.perf_counter()
+    if phi_cache is None:
+        compiled_R_phi = _compile_form(compiled_R_phi)
+        phi_profile["phi_form_cache_miss_count"] += 1
+        phi_vec = fem.assemble_vector(compiled_R_phi)
+        phi_profile["phi_rhs_assembly_time"] += time.perf_counter() - rhs_assemble_t0
+        rhs_extract_t0 = time.perf_counter()
+        phi_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        R_phi_total = phi_vec.array.copy()
+        phi_profile["phi_rhs_extract_time"] += time.perf_counter() - rhs_extract_t0
+    else:
+        phi_profile["reused_phi_rhs_vec"] = True
+        R_phi_total = _assemble_vector_array_compiled_reuse(phi_cache["R_phi_vec"], compiled_R_phi)
+        phi_profile["phi_rhs_assembly_time"] += time.perf_counter() - rhs_assemble_t0
+        rhs_extract_t0 = time.perf_counter()
+        R_phi_total = np.asarray(R_phi_total, dtype=np.float64)
+        phi_profile["phi_rhs_extract_time"] += time.perf_counter() - rhs_extract_t0
+    phi_profile["phi_form_call_count"] += 1
+    phi_profile["phi_rhs_extract_call_count"] += 1
+    phi_profile["phi_residual_call_count"] += 1
+    phi_profile["phi_residual_form_assembly_time"] += phi_profile["phi_rhs_assembly_time"]
+    phi_profile["phi_residual_extract_time"] += phi_profile["phi_rhs_extract_time"]
+    phi_profile["phi_form_assembly_time"] += phi_profile["phi_rhs_assembly_time"]
+    phi_profile["phi_rhs_extract_or_convert_time"] += phi_profile["phi_rhs_extract_time"]
+    phi_block_assembly_time = time.perf_counter() - phi_t0
 
     out = {
         "backend": backend,
+        "build_path": build_path,
         "R_u_total": R_u_total,
         "R_phi_total": R_phi_total,
         "R_u_struct": R_u_struct,
@@ -495,17 +1125,106 @@ def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jaco
         "solid_meta": solid_meta,
         "diagnostics": contact["diagnostics"],
         "point_data": contact["point_data"],
+        "contact_profiling": contact.get("profiling", {}),
         "u_constrained_dofs": _owned_bc_dofs(state["solid_bcs"]),
         "phi_constrained_dofs": _owned_bc_dofs(state["phi_bcs"]),
+        "struct_block_assembly_time": float(struct_block_assembly_time),
+        "contact_block_assembly_time": float(contact_block_assembly_time),
+        "phi_block_assembly_time": float(phi_block_assembly_time),
         **dof_layout,
     }
+    for key, value in contact.get("profiling", {}).items():
+        out[key] = value
+    assembly_time = struct_block_assembly_time + contact_block_assembly_time + phi_block_assembly_time
 
     if need_jacobian:
+        block_build_t0 = time.perf_counter()
         out["J_uu"] = J_uu_struct - contact["K_uu_c"]
         out["J_uphi"] = -contact["K_uphi_c"]
-        out["J_phiu"] = _assemble_matrix_dense(state["K_phi_u_form"])
-        out["J_phiphi"] = _assemble_matrix_dense(state["K_phi_phi_form"])
-        out.update(_assemble_global_backend_objects(state, out, backend))
+        compiled_K_phi_u = state["K_phi_u_form"] if phi_cache is None else phi_cache["K_phi_u_form"]
+        compiled_K_phi_phi = state["K_phi_phi_form"] if phi_cache is None else phi_cache["K_phi_phi_form"]
+        if phi_cache is None:
+            compiled_K_phi_u = _compile_form(compiled_K_phi_u)
+            compiled_K_phi_phi = _compile_form(compiled_K_phi_phi)
+            phi_profile["phi_form_cache_miss_count"] += 2
+
+            phiu_form_t0 = time.perf_counter()
+            phiu_mat = fem.assemble_matrix(compiled_K_phi_u)
+            phiu_mat.assemble()
+            phiu_form_time = time.perf_counter() - phiu_form_t0
+            phiu_extract_t0 = time.perf_counter()
+            out["J_phiu"] = dense_array_from_petsc_mat(phiu_mat)
+            phiu_extract_time = time.perf_counter() - phiu_extract_t0
+            phiu_convert_time = 0.0
+
+            phiphi_form_t0 = time.perf_counter()
+            phiphi_mat = fem.assemble_matrix(compiled_K_phi_phi)
+            phiphi_mat.assemble()
+            phiphi_form_time = time.perf_counter() - phiphi_form_t0
+            phiphi_extract_t0 = time.perf_counter()
+            out["J_phiphi"] = dense_array_from_petsc_mat(phiphi_mat)
+            phiphi_extract_time = time.perf_counter() - phiphi_extract_t0
+            phiphi_convert_time = 0.0
+        else:
+            phi_profile["reused_phi_kphiu_mat"] = True
+            phi_profile["reused_phi_kphiphi_mat"] = True
+            phi_profile["reused_phi_dense_buffers"] = True
+
+            phiu_form_t0 = time.perf_counter()
+            out["J_phiu"], phiu_extract_time, phiu_convert_time = _assemble_matrix_dense_compiled_reuse(
+                phi_cache["K_phi_u_mat"],
+                compiled_K_phi_u,
+                dense_buffer=phi_cache["J_phiu_dense"],
+            )
+            phiu_form_time = time.perf_counter() - phiu_form_t0 - phiu_extract_time - phiu_convert_time
+
+            phiphi_form_t0 = time.perf_counter()
+            out["J_phiphi"], phiphi_extract_time, phiphi_convert_time = _assemble_matrix_dense_compiled_reuse(
+                phi_cache["K_phi_phi_mat"],
+                compiled_K_phi_phi,
+                dense_buffer=phi_cache["J_phiphi_dense"],
+            )
+            phiphi_form_time = time.perf_counter() - phiphi_form_t0 - phiphi_extract_time - phiphi_convert_time
+
+        phi_profile["phi_form_call_count"] += 2
+        phi_profile["phi_matrix_extract_call_count"] += 2
+        phi_profile["phi_matrix_convert_call_count"] += 2
+        phi_profile["phi_kphiu_call_count"] += 1
+        phi_profile["phi_kphiphi_call_count"] += 1
+        phi_profile["phi_kphiu_form_assembly_time"] += float(phiu_form_time)
+        phi_profile["phi_kphiu_extract_time"] += float(phiu_extract_time)
+        phi_profile["phi_kphiu_convert_time"] += float(phiu_convert_time)
+        phi_profile["phi_kphiphi_form_assembly_time"] += float(phiphi_form_time)
+        phi_profile["phi_kphiphi_extract_time"] += float(phiphi_extract_time)
+        phi_profile["phi_kphiphi_convert_time"] += float(phiphi_convert_time)
+        phi_profile["phi_form_assembly_time"] += float(phiu_form_time + phiphi_form_time)
+        phi_profile["phi_matrix_extract_time"] += float(phiu_extract_time + phiphi_extract_time)
+        phi_profile["phi_matrix_convert_time"] += float(phiu_convert_time + phiphi_convert_time)
+        phi_profile["phi_matrix_extract_or_convert_time"] += float(
+            phiu_extract_time + phiphi_extract_time + phiu_convert_time + phiphi_convert_time
+        )
+
+        out["phi_block_assembly_time"] = float(time.perf_counter() - phi_t0)
+        out["nnz_Juu"] = _nnz_dense(out["J_uu"])
+        out["nnz_Juphi"] = _nnz_dense(out["J_uphi"])
+        out["nnz_Jphiu"] = _nnz_dense(out["J_phiu"])
+        out["nnz_Jphiphi"] = _nnz_dense(out["J_phiphi"])
+        out.update(
+            _assemble_global_backend_objects(
+                state,
+                out,
+                backend,
+                build_path=build_path,
+                linear_solver_mode=linear_solver_mode,
+                ksp_type=ksp_type,
+                pc_type=pc_type,
+                block_pc_name=block_pc_name,
+                reuse_matrix_pattern=reuse_matrix_pattern,
+                reuse_fieldsplit_is=reuse_fieldsplit_is,
+            )
+        )
+        out["nnz_global"] = _nnz_dense(out["global_jacobian_dense"])
+        block_build_time = time.perf_counter() - block_build_t0
     else:
         out["J_uu"] = None
         out["J_uphi"] = None
@@ -519,7 +1238,30 @@ def assemble_monolithic_contact_system(state, cfg, *, backend="dense", need_jaco
             if backend == "petsc_block"
             else None
         )
+        out["nnz_Juu"] = 0
+        out["nnz_Juphi"] = 0
+        out["nnz_Jphiu"] = 0
+        out["nnz_Jphiphi"] = 0
+        out["nnz_global"] = 0
+        out["bc_elimination_time"] = 0.0
+        out["global_matrix_allocation_time"] = 0.0
+        out["global_matrix_fill_time"] = 0.0
+        out["global_rhs_build_time"] = 0.0
+        out["petsc_object_setup_time"] = 0.0
+        out["reused_global_matrix"] = False
+        out["reused_global_rhs_vec"] = False
+        out["reused_fieldsplit_is"] = False
+        out["reuse_context"] = None
+        block_build_time = 0.0
 
+    _merge_profile(out, phi_profile)
+    assembly_time = (
+        struct_block_assembly_time
+        + contact_block_assembly_time
+        + float(out.get("phi_block_assembly_time", phi_block_assembly_time))
+    )
+    out["assembly_time"] = float(assembly_time)
+    out["block_build_time"] = float(block_build_time)
     return out
 
 
@@ -588,10 +1330,14 @@ def solve_monolithic_contact(
     cfg,
     *,
     backend="dense",
+    build_path="current",
     linear_solver_mode="lu",
     ksp_type="gmres",
     pc_type="fieldsplit",
     block_pc_name="fieldsplit_additive_ilu",
+    reuse_ksp=False,
+    reuse_matrix_pattern=False,
+    reuse_fieldsplit_is=False,
     ksp_rtol=1e-10,
     ksp_atol=1e-12,
     ksp_max_it=400,
@@ -602,6 +1348,7 @@ def solve_monolithic_contact(
     initial_damping=1.0,
     max_backtracks=8,
     backtrack_factor=0.5,
+    profile_assembly_detail=False,
     verbose=True,
 ):
     """Solve one fixed-load monolithic contact state."""
@@ -611,7 +1358,21 @@ def solve_monolithic_contact(
     failure_reason = ""
 
     for newton_it in range(1, max_newton_iter + 1):
-        assembled = assemble_monolithic_contact_system(state, cfg, backend=backend, need_jacobian=True)
+        newton_step_t0 = time.perf_counter()
+        assembled = assemble_monolithic_contact_system(
+            state,
+            cfg,
+            backend=backend,
+            need_jacobian=True,
+            build_path=build_path,
+            linear_solver_mode=linear_solver_mode,
+            ksp_type=ksp_type,
+            pc_type=pc_type,
+            block_pc_name=block_pc_name,
+            reuse_matrix_pattern=reuse_matrix_pattern,
+            reuse_fieldsplit_is=reuse_fieldsplit_is,
+            profile_assembly_detail=profile_assembly_detail,
+        )
         residual = assembled["global_residual_array"]
         residual_norm = float(np.linalg.norm(residual))
         if residual_norm < tol_res:
@@ -639,6 +1400,92 @@ def solve_monolithic_contact(
                 "outer_residual_norm_before_linear": 0.0,
                 "outer_residual_norm_after_linear": residual_norm,
                 "relative_linear_reduction": 0.0,
+                "struct_block_assembly_time": float(assembled.get("struct_block_assembly_time", 0.0)),
+                "contact_block_assembly_time": float(assembled.get("contact_block_assembly_time", 0.0)),
+                "phi_block_assembly_time": float(assembled.get("phi_block_assembly_time", 0.0)),
+                "contact_quadrature_loop_time": float(assembled.get("contact_quadrature_loop_time", 0.0)),
+                "contact_geometry_eval_time": float(assembled.get("contact_geometry_eval_time", 0.0)),
+                "contact_query_time": float(assembled.get("contact_query_time", 0.0)),
+                "contact_gap_normal_eval_time": float(assembled.get("contact_gap_normal_eval_time", 0.0)),
+                "contact_active_filter_time": float(assembled.get("contact_active_filter_time", 0.0)),
+                "contact_local_residual_time": float(assembled.get("contact_local_residual_time", 0.0)),
+                "contact_local_tangent_uu_time": float(assembled.get("contact_local_tangent_uu_time", 0.0)),
+                "contact_local_tangent_uphi_time": float(assembled.get("contact_local_tangent_uphi_time", 0.0)),
+                "contact_geometry_eval_call_count": int(assembled.get("contact_geometry_eval_call_count", 0)),
+                "contact_geometry_eval_avg_time": float(assembled.get("contact_geometry_eval_avg_time", 0.0)),
+                "contact_query_avg_time": float(assembled.get("contact_query_avg_time", 0.0)),
+                "contact_query_call_count": int(assembled.get("contact_query_call_count", 0)),
+                "contact_query_cache_hit_count": int(assembled.get("contact_query_cache_hit_count", 0)),
+                "contact_query_cache_miss_count": int(assembled.get("contact_query_cache_miss_count", 0)),
+                "contact_sensitivity_call_count": int(assembled.get("contact_sensitivity_call_count", 0)),
+                "contact_sensitivity_cache_hit_count": int(assembled.get("contact_sensitivity_cache_hit_count", 0)),
+                "contact_sensitivity_cache_miss_count": int(assembled.get("contact_sensitivity_cache_miss_count", 0)),
+                "contact_sensitivity_time": float(assembled.get("contact_sensitivity_time", 0.0)),
+                "contact_sensitivity_avg_time": float(assembled.get("contact_sensitivity_avg_time", 0.0)),
+                "contact_local_tangent_uphi_call_count": int(assembled.get("contact_local_tangent_uphi_call_count", 0)),
+                "contact_local_tangent_uu_call_count": int(assembled.get("contact_local_tangent_uu_call_count", 0)),
+                "cell_geometry_cache_hit_count": int(assembled.get("cell_geometry_cache_hit_count", 0)),
+                "cell_geometry_cache_miss_count": int(assembled.get("cell_geometry_cache_miss_count", 0)),
+                "function_cell_dof_cache_hit_count": int(assembled.get("function_cell_dof_cache_hit_count", 0)),
+                "function_cell_dof_cache_miss_count": int(assembled.get("function_cell_dof_cache_miss_count", 0)),
+                "vector_subfunction_cache_hit_count": int(assembled.get("vector_subfunction_cache_hit_count", 0)),
+                "vector_subfunction_cache_miss_count": int(assembled.get("vector_subfunction_cache_miss_count", 0)),
+                "contact_scatter_to_global_time": float(assembled.get("contact_scatter_to_global_time", 0.0)),
+                "phi_form_assembly_time": float(assembled.get("phi_form_assembly_time", 0.0)),
+                "phi_matrix_extract_time": float(assembled.get("phi_matrix_extract_time", 0.0)),
+                "phi_matrix_convert_time": float(assembled.get("phi_matrix_convert_time", 0.0)),
+                "phi_rhs_assembly_time": float(assembled.get("phi_rhs_assembly_time", 0.0)),
+                "phi_rhs_extract_time": float(assembled.get("phi_rhs_extract_time", 0.0)),
+                "phi_matrix_extract_or_convert_time": float(assembled.get("phi_matrix_extract_or_convert_time", 0.0)),
+                "phi_rhs_extract_or_convert_time": float(assembled.get("phi_rhs_extract_or_convert_time", 0.0)),
+                "phi_dof_lookup_time": float(assembled.get("phi_dof_lookup_time", 0.0)),
+                "phi_geometry_helper_time": float(assembled.get("phi_geometry_helper_time", 0.0)),
+                "phi_basis_tabulation_time": float(assembled.get("phi_basis_tabulation_time", 0.0)),
+                "phi_form_call_count": int(assembled.get("phi_form_call_count", 0)),
+                "phi_form_cache_hit_count": int(assembled.get("phi_form_cache_hit_count", 0)),
+                "phi_form_cache_miss_count": int(assembled.get("phi_form_cache_miss_count", 0)),
+                "phi_matrix_extract_call_count": int(assembled.get("phi_matrix_extract_call_count", 0)),
+                "phi_matrix_convert_call_count": int(assembled.get("phi_matrix_convert_call_count", 0)),
+                "phi_rhs_extract_call_count": int(assembled.get("phi_rhs_extract_call_count", 0)),
+                "phi_dof_lookup_call_count": int(assembled.get("phi_dof_lookup_call_count", 0)),
+                "phi_basis_tabulation_call_count": int(assembled.get("phi_basis_tabulation_call_count", 0)),
+                "phi_residual_form_assembly_time": float(assembled.get("phi_residual_form_assembly_time", 0.0)),
+                "phi_residual_extract_time": float(assembled.get("phi_residual_extract_time", 0.0)),
+                "phi_kphiu_form_assembly_time": float(assembled.get("phi_kphiu_form_assembly_time", 0.0)),
+                "phi_kphiu_extract_time": float(assembled.get("phi_kphiu_extract_time", 0.0)),
+                "phi_kphiu_convert_time": float(assembled.get("phi_kphiu_convert_time", 0.0)),
+                "phi_kphiphi_form_assembly_time": float(assembled.get("phi_kphiphi_form_assembly_time", 0.0)),
+                "phi_kphiphi_extract_time": float(assembled.get("phi_kphiphi_extract_time", 0.0)),
+                "phi_kphiphi_convert_time": float(assembled.get("phi_kphiphi_convert_time", 0.0)),
+                "dofmap_lookup_time": float(assembled.get("dofmap_lookup_time", 0.0)),
+                "surface_entity_iteration_time": float(assembled.get("surface_entity_iteration_time", 0.0)),
+                "basis_eval_or_tabulation_time": float(assembled.get("basis_eval_or_tabulation_time", 0.0)),
+                "numpy_temp_allocation_time": float(assembled.get("numpy_temp_allocation_time", 0.0)),
+                "assembly_time": float(assembled.get("assembly_time", 0.0)),
+                "block_build_time": float(assembled.get("block_build_time", 0.0)),
+                "bc_elimination_time": float(assembled.get("bc_elimination_time", 0.0)),
+                "global_matrix_allocation_time": float(assembled.get("global_matrix_allocation_time", 0.0)),
+                "global_matrix_fill_time": float(assembled.get("global_matrix_fill_time", 0.0)),
+                "global_rhs_build_time": float(assembled.get("global_rhs_build_time", 0.0)),
+                "petsc_object_setup_time": float(assembled.get("petsc_object_setup_time", 0.0)),
+                "ksp_setup_time": 0.0,
+                "ksp_solve_time": 0.0,
+                "linear_solve_time": 0.0,
+                "state_update_time": 0.0,
+                "newton_step_walltime": 0.0,
+                "reused_global_matrix": bool(assembled.get("reused_global_matrix", False)),
+                "reused_global_rhs_vec": bool(assembled.get("reused_global_rhs_vec", False)),
+                "reused_ksp": False,
+                "reused_fieldsplit_is": bool(assembled.get("reused_fieldsplit_is", False)),
+                "reused_subksp": False,
+                "reuse_attempted": False,
+                "reuse_failed_stage": "",
+                "reuse_failure_message": "",
+                "nnz_global": int(assembled.get("nnz_global", 0)),
+                "nnz_Juu": int(assembled.get("nnz_Juu", 0)),
+                "nnz_Juphi": int(assembled.get("nnz_Juphi", 0)),
+                "nnz_Jphiu": int(assembled.get("nnz_Jphiu", 0)),
+                "nnz_Jphiphi": int(assembled.get("nnz_Jphiphi", 0)),
                 **dof_layout,
                 "history": history,
             }
@@ -654,10 +1501,15 @@ def solve_monolithic_contact(
                 "linear_iterations": 0,
                 "ksp_reason": 0,
             }
+            linear_solve_t0 = time.perf_counter()
             if backend == "dense":
                 delta = np.linalg.solve(assembled["global_jacobian_dense"], -residual)
             elif backend == "petsc_block":
-                rhs = _create_petsc_vec_from_array(-residual, state["domain"].mpi_comm())
+                if assembled.get("global_residual_vec") is not None and reuse_matrix_pattern:
+                    rhs = assembled["global_residual_vec"].duplicate()
+                    _fill_petsc_vec_from_array(rhs, -residual)
+                else:
+                    rhs = _create_petsc_vec_from_array(-residual, state["domain"].mpi_comm())
                 ndof_u = state["u"].vector.getLocalSize()
                 ndof_phi = state["phi"].vector.getLocalSize()
                 delta, _, linear_info = _solve_petsc_linear_system(
@@ -669,6 +1521,13 @@ def solve_monolithic_contact(
                     ksp_type=ksp_type,
                     pc_type=pc_type,
                     block_pc_name=block_pc_name,
+                    reuse_context=(
+                        assembled.get("reuse_context")
+                        if (reuse_ksp or reuse_fieldsplit_is)
+                        else None
+                    ),
+                    reuse_ksp=reuse_ksp,
+                    reuse_fieldsplit_is=reuse_fieldsplit_is,
                     ksp_rtol=ksp_rtol,
                     ksp_atol=ksp_atol,
                     ksp_max_it=ksp_max_it,
@@ -681,6 +1540,7 @@ def solve_monolithic_contact(
                     break
             else:
                 raise ValueError(f"Unsupported monolithic backend: {backend}")
+            linear_solve_time = time.perf_counter() - linear_solve_t0
         except (np.linalg.LinAlgError, RuntimeError) as exc:
             failure_reason = f"monolithic solve failed: {exc}"
             break
@@ -691,6 +1551,7 @@ def solve_monolithic_contact(
         increment_norm = float(np.linalg.norm(delta))
 
         used_fallback = False
+        state_update_t0 = time.perf_counter()
         if line_search:
             line_search_out = _backtracking_line_search(
                 state,
@@ -714,12 +1575,15 @@ def solve_monolithic_contact(
             _apply_state_increment(state, delta_u, delta_phi, scale=1.0)
             step_length = 1.0
             residual_after, assembled_after = _evaluate_total_residual_norm(state, cfg, backend=backend)
+        state_update_time = time.perf_counter() - state_update_t0
+        newton_step_walltime = time.perf_counter() - newton_step_t0
 
         row = {
             "newton_iteration": newton_it,
             "mesh_resolution": dof_layout["mesh_resolution"],
             "ndof_u": dof_layout["ndof_u"],
             "ndof_phi": dof_layout["ndof_phi"],
+            "build_path": build_path,
             "residual_norm_before": residual_norm,
             "residual_norm_after": residual_after,
             "residual_norm": residual_after,
@@ -728,6 +1592,94 @@ def solve_monolithic_contact(
             "relative_linear_reduction": (
                 0.0 if residual_norm <= 0.0 else float(residual_after / residual_norm)
             ),
+            "assembly_time": float(assembled.get("assembly_time", 0.0)),
+            "struct_block_assembly_time": float(assembled.get("struct_block_assembly_time", 0.0)),
+            "contact_block_assembly_time": float(assembled.get("contact_block_assembly_time", 0.0)),
+            "phi_block_assembly_time": float(assembled.get("phi_block_assembly_time", 0.0)),
+            "contact_quadrature_loop_time": float(assembled.get("contact_quadrature_loop_time", 0.0)),
+            "contact_geometry_eval_time": float(assembled.get("contact_geometry_eval_time", 0.0)),
+            "contact_query_time": float(assembled.get("contact_query_time", 0.0)),
+            "contact_gap_normal_eval_time": float(assembled.get("contact_gap_normal_eval_time", 0.0)),
+            "contact_active_filter_time": float(assembled.get("contact_active_filter_time", 0.0)),
+            "contact_local_residual_time": float(assembled.get("contact_local_residual_time", 0.0)),
+            "contact_local_tangent_uu_time": float(assembled.get("contact_local_tangent_uu_time", 0.0)),
+            "contact_local_tangent_uphi_time": float(assembled.get("contact_local_tangent_uphi_time", 0.0)),
+            "contact_geometry_eval_call_count": int(assembled.get("contact_geometry_eval_call_count", 0)),
+            "contact_geometry_eval_avg_time": float(assembled.get("contact_geometry_eval_avg_time", 0.0)),
+            "contact_query_avg_time": float(assembled.get("contact_query_avg_time", 0.0)),
+            "contact_query_call_count": int(assembled.get("contact_query_call_count", 0)),
+            "contact_query_cache_hit_count": int(assembled.get("contact_query_cache_hit_count", 0)),
+            "contact_query_cache_miss_count": int(assembled.get("contact_query_cache_miss_count", 0)),
+            "contact_sensitivity_call_count": int(assembled.get("contact_sensitivity_call_count", 0)),
+            "contact_sensitivity_cache_hit_count": int(assembled.get("contact_sensitivity_cache_hit_count", 0)),
+            "contact_sensitivity_cache_miss_count": int(assembled.get("contact_sensitivity_cache_miss_count", 0)),
+            "contact_sensitivity_time": float(assembled.get("contact_sensitivity_time", 0.0)),
+            "contact_sensitivity_avg_time": float(assembled.get("contact_sensitivity_avg_time", 0.0)),
+            "contact_local_tangent_uphi_call_count": int(assembled.get("contact_local_tangent_uphi_call_count", 0)),
+            "contact_local_tangent_uu_call_count": int(assembled.get("contact_local_tangent_uu_call_count", 0)),
+            "cell_geometry_cache_hit_count": int(assembled.get("cell_geometry_cache_hit_count", 0)),
+            "cell_geometry_cache_miss_count": int(assembled.get("cell_geometry_cache_miss_count", 0)),
+            "function_cell_dof_cache_hit_count": int(assembled.get("function_cell_dof_cache_hit_count", 0)),
+            "function_cell_dof_cache_miss_count": int(assembled.get("function_cell_dof_cache_miss_count", 0)),
+            "vector_subfunction_cache_hit_count": int(assembled.get("vector_subfunction_cache_hit_count", 0)),
+            "vector_subfunction_cache_miss_count": int(assembled.get("vector_subfunction_cache_miss_count", 0)),
+            "contact_scatter_to_global_time": float(assembled.get("contact_scatter_to_global_time", 0.0)),
+            "phi_form_assembly_time": float(assembled.get("phi_form_assembly_time", 0.0)),
+            "phi_matrix_extract_time": float(assembled.get("phi_matrix_extract_time", 0.0)),
+            "phi_matrix_convert_time": float(assembled.get("phi_matrix_convert_time", 0.0)),
+            "phi_rhs_assembly_time": float(assembled.get("phi_rhs_assembly_time", 0.0)),
+            "phi_rhs_extract_time": float(assembled.get("phi_rhs_extract_time", 0.0)),
+            "phi_matrix_extract_or_convert_time": float(assembled.get("phi_matrix_extract_or_convert_time", 0.0)),
+            "phi_rhs_extract_or_convert_time": float(assembled.get("phi_rhs_extract_or_convert_time", 0.0)),
+            "phi_dof_lookup_time": float(assembled.get("phi_dof_lookup_time", 0.0)),
+            "phi_geometry_helper_time": float(assembled.get("phi_geometry_helper_time", 0.0)),
+            "phi_basis_tabulation_time": float(assembled.get("phi_basis_tabulation_time", 0.0)),
+            "phi_form_call_count": int(assembled.get("phi_form_call_count", 0)),
+            "phi_form_cache_hit_count": int(assembled.get("phi_form_cache_hit_count", 0)),
+            "phi_form_cache_miss_count": int(assembled.get("phi_form_cache_miss_count", 0)),
+            "phi_matrix_extract_call_count": int(assembled.get("phi_matrix_extract_call_count", 0)),
+            "phi_matrix_convert_call_count": int(assembled.get("phi_matrix_convert_call_count", 0)),
+            "phi_rhs_extract_call_count": int(assembled.get("phi_rhs_extract_call_count", 0)),
+            "phi_dof_lookup_call_count": int(assembled.get("phi_dof_lookup_call_count", 0)),
+            "phi_basis_tabulation_call_count": int(assembled.get("phi_basis_tabulation_call_count", 0)),
+            "phi_residual_form_assembly_time": float(assembled.get("phi_residual_form_assembly_time", 0.0)),
+            "phi_residual_extract_time": float(assembled.get("phi_residual_extract_time", 0.0)),
+            "phi_kphiu_form_assembly_time": float(assembled.get("phi_kphiu_form_assembly_time", 0.0)),
+            "phi_kphiu_extract_time": float(assembled.get("phi_kphiu_extract_time", 0.0)),
+            "phi_kphiu_convert_time": float(assembled.get("phi_kphiu_convert_time", 0.0)),
+            "phi_kphiphi_form_assembly_time": float(assembled.get("phi_kphiphi_form_assembly_time", 0.0)),
+            "phi_kphiphi_extract_time": float(assembled.get("phi_kphiphi_extract_time", 0.0)),
+            "phi_kphiphi_convert_time": float(assembled.get("phi_kphiphi_convert_time", 0.0)),
+            "dofmap_lookup_time": float(assembled.get("dofmap_lookup_time", 0.0)),
+            "surface_entity_iteration_time": float(assembled.get("surface_entity_iteration_time", 0.0)),
+            "basis_eval_or_tabulation_time": float(assembled.get("basis_eval_or_tabulation_time", 0.0)),
+            "numpy_temp_allocation_time": float(assembled.get("numpy_temp_allocation_time", 0.0)),
+            "block_build_time": float(assembled.get("block_build_time", 0.0)),
+            "bc_elimination_time": float(assembled.get("bc_elimination_time", 0.0)),
+            "global_matrix_allocation_time": float(assembled.get("global_matrix_allocation_time", 0.0)),
+            "global_matrix_fill_time": float(assembled.get("global_matrix_fill_time", 0.0)),
+            "global_rhs_build_time": float(assembled.get("global_rhs_build_time", 0.0)),
+            "petsc_object_setup_time": float(assembled.get("petsc_object_setup_time", 0.0)),
+            "ksp_setup_time": float(linear_info.get("ksp_setup_time", 0.0)),
+            "ksp_solve_time": float(linear_info.get("ksp_solve_time", linear_solve_time)),
+            "linear_solve_time": float(linear_solve_time),
+            "state_update_time": float(state_update_time),
+            "newton_step_walltime": float(newton_step_walltime),
+            "reused_global_matrix": bool(assembled.get("reused_global_matrix", False)),
+            "reused_global_rhs_vec": bool(assembled.get("reused_global_rhs_vec", False)),
+            "reused_ksp": bool(linear_info.get("reused_ksp", False)),
+            "reused_fieldsplit_is": bool(
+                assembled.get("reused_fieldsplit_is", False) or linear_info.get("reused_fieldsplit_is", False)
+            ),
+            "reused_subksp": bool(linear_info.get("reused_subksp", False)),
+            "reuse_attempted": bool(linear_info.get("reuse_attempted", False)),
+            "reuse_failed_stage": linear_info.get("reuse_failed_stage", ""),
+            "reuse_failure_message": linear_info.get("reuse_failure_message", ""),
+            "nnz_global": int(assembled.get("nnz_global", 0)),
+            "nnz_Juu": int(assembled.get("nnz_Juu", 0)),
+            "nnz_Juphi": int(assembled.get("nnz_Juphi", 0)),
+            "nnz_Jphiu": int(assembled.get("nnz_Jphiu", 0)),
+            "nnz_Jphiphi": int(assembled.get("nnz_Jphiphi", 0)),
             "increment_norm": increment_norm,
             "active_contact_points": assembled["diagnostics"]["active_contact_points"],
             "negative_gap_sum": assembled["diagnostics"]["negative_gap_sum"],
@@ -756,6 +1708,9 @@ def solve_monolithic_contact(
                 f"||R||={residual_norm:.6e} -> {residual_after:.6e}, "
                 f"||d||={increment_norm:.6e}, alpha={step_length:.3f}, "
                 f"lin_it={row['linear_iterations']}, "
+                f"asm={row['assembly_time']:.3e}s, "
+                f"blk={row['block_build_time']:.3e}s, "
+                f"lin={row['linear_solve_time']:.3e}s, "
                 f"active={row['active_contact_points_after']}, "
                 f"gap_sum={row['negative_gap_sum_after']:.6e}"
             )
@@ -785,6 +1740,11 @@ def solve_monolithic_contact(
                 "outer_residual_norm_before_linear": row["outer_residual_norm_before_linear"],
                 "outer_residual_norm_after_linear": row["outer_residual_norm_after_linear"],
                 "relative_linear_reduction": row["relative_linear_reduction"],
+                "assembly_time": row["assembly_time"],
+                "block_build_time": row["block_build_time"],
+                "linear_solve_time": row["linear_solve_time"],
+                "state_update_time": row["state_update_time"],
+                "newton_step_walltime": row["newton_step_walltime"],
                 **dof_layout,
                 "history": history,
             }
@@ -833,6 +1793,49 @@ def solve_monolithic_contact(
         "outer_residual_norm_before_linear": last.get("outer_residual_norm_before_linear", np.inf),
         "outer_residual_norm_after_linear": last.get("outer_residual_norm_after_linear", np.inf),
         "relative_linear_reduction": last.get("relative_linear_reduction", np.inf),
+        "struct_block_assembly_time": last.get("struct_block_assembly_time", 0.0),
+        "contact_block_assembly_time": last.get("contact_block_assembly_time", 0.0),
+        "phi_block_assembly_time": last.get("phi_block_assembly_time", 0.0),
+        "contact_quadrature_loop_time": last.get("contact_quadrature_loop_time", 0.0),
+        "contact_geometry_eval_time": last.get("contact_geometry_eval_time", 0.0),
+        "contact_gap_normal_eval_time": last.get("contact_gap_normal_eval_time", 0.0),
+        "contact_active_filter_time": last.get("contact_active_filter_time", 0.0),
+        "contact_local_residual_time": last.get("contact_local_residual_time", 0.0),
+        "contact_local_tangent_uu_time": last.get("contact_local_tangent_uu_time", 0.0),
+        "contact_local_tangent_uphi_time": last.get("contact_local_tangent_uphi_time", 0.0),
+        "contact_scatter_to_global_time": last.get("contact_scatter_to_global_time", 0.0),
+        "phi_form_assembly_time": last.get("phi_form_assembly_time", 0.0),
+        "phi_matrix_extract_or_convert_time": last.get("phi_matrix_extract_or_convert_time", 0.0),
+        "phi_rhs_extract_or_convert_time": last.get("phi_rhs_extract_or_convert_time", 0.0),
+        "dofmap_lookup_time": last.get("dofmap_lookup_time", 0.0),
+        "surface_entity_iteration_time": last.get("surface_entity_iteration_time", 0.0),
+        "basis_eval_or_tabulation_time": last.get("basis_eval_or_tabulation_time", 0.0),
+        "numpy_temp_allocation_time": last.get("numpy_temp_allocation_time", 0.0),
+        "assembly_time": last.get("assembly_time", 0.0),
+        "block_build_time": last.get("block_build_time", 0.0),
+        "bc_elimination_time": last.get("bc_elimination_time", 0.0),
+        "global_matrix_allocation_time": last.get("global_matrix_allocation_time", 0.0),
+        "global_matrix_fill_time": last.get("global_matrix_fill_time", 0.0),
+        "global_rhs_build_time": last.get("global_rhs_build_time", 0.0),
+        "petsc_object_setup_time": last.get("petsc_object_setup_time", 0.0),
+        "ksp_setup_time": last.get("ksp_setup_time", 0.0),
+        "ksp_solve_time": last.get("ksp_solve_time", 0.0),
+        "linear_solve_time": last.get("linear_solve_time", 0.0),
+        "state_update_time": last.get("state_update_time", 0.0),
+        "newton_step_walltime": last.get("newton_step_walltime", 0.0),
+        "reused_global_matrix": last.get("reused_global_matrix", False),
+        "reused_global_rhs_vec": last.get("reused_global_rhs_vec", False),
+        "reused_ksp": last.get("reused_ksp", False),
+        "reused_fieldsplit_is": last.get("reused_fieldsplit_is", False),
+        "reused_subksp": last.get("reused_subksp", False),
+        "reuse_attempted": last.get("reuse_attempted", False),
+        "reuse_failed_stage": last.get("reuse_failed_stage", ""),
+        "reuse_failure_message": last.get("reuse_failure_message", ""),
+        "nnz_global": last.get("nnz_global", 0),
+        "nnz_Juu": last.get("nnz_Juu", 0),
+        "nnz_Juphi": last.get("nnz_Juphi", 0),
+        "nnz_Jphiu": last.get("nnz_Jphiu", 0),
+        "nnz_Jphiphi": last.get("nnz_Jphiphi", 0),
         **dof_layout,
         "history": history,
     }
@@ -845,10 +1848,14 @@ def solve_monolithic_contact_loadpath(
     load_schedule,
     *,
     backend="dense",
+    build_path="current",
     linear_solver_mode="lu",
     ksp_type="gmres",
     pc_type="fieldsplit",
     block_pc_name="fieldsplit_additive_ilu",
+    reuse_ksp=False,
+    reuse_matrix_pattern=False,
+    reuse_fieldsplit_is=False,
     ksp_rtol=1e-10,
     ksp_atol=1e-12,
     ksp_max_it=400,
@@ -864,6 +1871,11 @@ def solve_monolithic_contact_loadpath(
     history_path=None,
     verbose=True,
     min_cutback_increment=1e-8,
+    max_load_steps=None,
+    max_newton_steps=None,
+    max_walltime_seconds=None,
+    stop_after_first_nonzero_accepted_step=False,
+    profile_assembly_detail=False,
 ):
     """Advance a load path with the monolithic Newton step."""
     rank0 = state0["domain"].mpi_comm().rank == 0
@@ -892,8 +1904,17 @@ def solve_monolithic_contact_loadpath(
     index = 0
     terminated_early = False
     termination_reason = "completed_schedule"
+    termination_category = "completed_full_run"
+    start_walltime = time.perf_counter()
+    total_newton_steps_used = 0
 
     while index < len(steps):
+        elapsed_before_attempt = time.perf_counter() - start_walltime
+        if max_walltime_seconds is not None and elapsed_before_attempt >= float(max_walltime_seconds):
+            terminated_early = True
+            termination_reason = "Reached max_walltime_seconds before next load step"
+            termination_category = "terminated_by_walltime"
+            break
         step_data = dict(steps[index])
         attempt_load = float(step_data.get("attempt_load", step_data["load_value"]))
         target_load = float(step_data.get("target_load", attempt_load))
@@ -902,6 +1923,7 @@ def solve_monolithic_contact_loadpath(
         attempt_state_index += 1
         snapshot = _snapshot_state_fields(state0)
         _apply_step_data(state0, step_data)
+        load_step_t0 = time.perf_counter()
 
         if verbose and rank0:
             print(
@@ -914,10 +1936,14 @@ def solve_monolithic_contact_loadpath(
             state0,
             cfg,
             backend=backend,
+            build_path=build_path,
             linear_solver_mode=linear_solver_mode,
             ksp_type=ksp_type,
             pc_type=pc_type,
             block_pc_name=block_pc_name,
+            reuse_ksp=reuse_ksp,
+            reuse_matrix_pattern=reuse_matrix_pattern,
+            reuse_fieldsplit_is=reuse_fieldsplit_is,
             ksp_rtol=ksp_rtol,
             ksp_atol=ksp_atol,
             ksp_max_it=ksp_max_it,
@@ -928,6 +1954,7 @@ def solve_monolithic_contact_loadpath(
             initial_damping=initial_damping,
             max_backtracks=max_backtracks,
             backtrack_factor=backtrack_factor,
+            profile_assembly_detail=profile_assembly_detail,
             verbose=verbose,
         )
 
@@ -943,6 +1970,7 @@ def solve_monolithic_contact_loadpath(
             "load_increment": load_increment,
             "converged": bool(step_info["converged"]),
             "backend": backend,
+            "build_path": build_path,
             "linear_solver_mode": step_info["linear_solver_mode"],
             "ksp_type": step_info["ksp_type"],
             "pc_type": step_info["pc_type"],
@@ -954,6 +1982,83 @@ def solve_monolithic_contact_loadpath(
             "outer_residual_norm_after_linear": float(step_info["outer_residual_norm_after_linear"]),
             "relative_linear_reduction": float(step_info["relative_linear_reduction"]),
             "newton_iterations": int(step_info["newton_iterations"]),
+            "assembly_time": float(step_info.get("assembly_time", 0.0)),
+            "struct_block_assembly_time": float(step_info.get("struct_block_assembly_time", 0.0)),
+            "contact_block_assembly_time": float(step_info.get("contact_block_assembly_time", 0.0)),
+            "phi_block_assembly_time": float(step_info.get("phi_block_assembly_time", 0.0)),
+            "contact_quadrature_loop_time": float(step_info.get("contact_quadrature_loop_time", 0.0)),
+            "contact_geometry_eval_time": float(step_info.get("contact_geometry_eval_time", 0.0)),
+            "contact_query_time": float(step_info.get("contact_query_time", 0.0)),
+            "contact_gap_normal_eval_time": float(step_info.get("contact_gap_normal_eval_time", 0.0)),
+            "contact_active_filter_time": float(step_info.get("contact_active_filter_time", 0.0)),
+            "contact_local_residual_time": float(step_info.get("contact_local_residual_time", 0.0)),
+            "contact_local_tangent_uu_time": float(step_info.get("contact_local_tangent_uu_time", 0.0)),
+            "contact_local_tangent_uphi_time": float(step_info.get("contact_local_tangent_uphi_time", 0.0)),
+            "contact_geometry_eval_call_count": int(step_info.get("contact_geometry_eval_call_count", 0)),
+            "contact_geometry_eval_avg_time": float(step_info.get("contact_geometry_eval_avg_time", 0.0)),
+            "contact_query_avg_time": float(step_info.get("contact_query_avg_time", 0.0)),
+            "contact_query_call_count": int(step_info.get("contact_query_call_count", 0)),
+            "contact_query_cache_hit_count": int(step_info.get("contact_query_cache_hit_count", 0)),
+            "contact_query_cache_miss_count": int(step_info.get("contact_query_cache_miss_count", 0)),
+            "contact_sensitivity_call_count": int(step_info.get("contact_sensitivity_call_count", 0)),
+            "contact_sensitivity_cache_hit_count": int(step_info.get("contact_sensitivity_cache_hit_count", 0)),
+            "contact_sensitivity_cache_miss_count": int(step_info.get("contact_sensitivity_cache_miss_count", 0)),
+            "contact_sensitivity_time": float(step_info.get("contact_sensitivity_time", 0.0)),
+            "contact_sensitivity_avg_time": float(step_info.get("contact_sensitivity_avg_time", 0.0)),
+            "contact_local_tangent_uphi_call_count": int(step_info.get("contact_local_tangent_uphi_call_count", 0)),
+            "contact_local_tangent_uu_call_count": int(step_info.get("contact_local_tangent_uu_call_count", 0)),
+            "cell_geometry_cache_hit_count": int(step_info.get("cell_geometry_cache_hit_count", 0)),
+            "cell_geometry_cache_miss_count": int(step_info.get("cell_geometry_cache_miss_count", 0)),
+            "function_cell_dof_cache_hit_count": int(step_info.get("function_cell_dof_cache_hit_count", 0)),
+            "function_cell_dof_cache_miss_count": int(step_info.get("function_cell_dof_cache_miss_count", 0)),
+            "vector_subfunction_cache_hit_count": int(step_info.get("vector_subfunction_cache_hit_count", 0)),
+            "vector_subfunction_cache_miss_count": int(step_info.get("vector_subfunction_cache_miss_count", 0)),
+            "contact_scatter_to_global_time": float(step_info.get("contact_scatter_to_global_time", 0.0)),
+            "phi_form_assembly_time": float(step_info.get("phi_form_assembly_time", 0.0)),
+            "phi_matrix_extract_time": float(step_info.get("phi_matrix_extract_time", 0.0)),
+            "phi_matrix_convert_time": float(step_info.get("phi_matrix_convert_time", 0.0)),
+            "phi_rhs_assembly_time": float(step_info.get("phi_rhs_assembly_time", 0.0)),
+            "phi_rhs_extract_time": float(step_info.get("phi_rhs_extract_time", 0.0)),
+            "phi_matrix_extract_or_convert_time": float(
+                step_info.get("phi_matrix_extract_or_convert_time", 0.0)
+            ),
+            "phi_rhs_extract_or_convert_time": float(
+                step_info.get("phi_rhs_extract_or_convert_time", 0.0)
+            ),
+            "phi_dof_lookup_time": float(step_info.get("phi_dof_lookup_time", 0.0)),
+            "phi_geometry_helper_time": float(step_info.get("phi_geometry_helper_time", 0.0)),
+            "phi_basis_tabulation_time": float(step_info.get("phi_basis_tabulation_time", 0.0)),
+            "phi_form_call_count": int(step_info.get("phi_form_call_count", 0)),
+            "phi_form_cache_hit_count": int(step_info.get("phi_form_cache_hit_count", 0)),
+            "phi_form_cache_miss_count": int(step_info.get("phi_form_cache_miss_count", 0)),
+            "phi_matrix_extract_call_count": int(step_info.get("phi_matrix_extract_call_count", 0)),
+            "phi_matrix_convert_call_count": int(step_info.get("phi_matrix_convert_call_count", 0)),
+            "phi_rhs_extract_call_count": int(step_info.get("phi_rhs_extract_call_count", 0)),
+            "phi_dof_lookup_call_count": int(step_info.get("phi_dof_lookup_call_count", 0)),
+            "phi_basis_tabulation_call_count": int(step_info.get("phi_basis_tabulation_call_count", 0)),
+            "phi_residual_form_assembly_time": float(step_info.get("phi_residual_form_assembly_time", 0.0)),
+            "phi_residual_extract_time": float(step_info.get("phi_residual_extract_time", 0.0)),
+            "phi_kphiu_form_assembly_time": float(step_info.get("phi_kphiu_form_assembly_time", 0.0)),
+            "phi_kphiu_extract_time": float(step_info.get("phi_kphiu_extract_time", 0.0)),
+            "phi_kphiu_convert_time": float(step_info.get("phi_kphiu_convert_time", 0.0)),
+            "phi_kphiphi_form_assembly_time": float(step_info.get("phi_kphiphi_form_assembly_time", 0.0)),
+            "phi_kphiphi_extract_time": float(step_info.get("phi_kphiphi_extract_time", 0.0)),
+            "phi_kphiphi_convert_time": float(step_info.get("phi_kphiphi_convert_time", 0.0)),
+            "dofmap_lookup_time": float(step_info.get("dofmap_lookup_time", 0.0)),
+            "surface_entity_iteration_time": float(step_info.get("surface_entity_iteration_time", 0.0)),
+            "basis_eval_or_tabulation_time": float(step_info.get("basis_eval_or_tabulation_time", 0.0)),
+            "numpy_temp_allocation_time": float(step_info.get("numpy_temp_allocation_time", 0.0)),
+            "block_build_time": float(step_info.get("block_build_time", 0.0)),
+            "bc_elimination_time": float(step_info.get("bc_elimination_time", 0.0)),
+            "global_matrix_allocation_time": float(step_info.get("global_matrix_allocation_time", 0.0)),
+            "global_matrix_fill_time": float(step_info.get("global_matrix_fill_time", 0.0)),
+            "global_rhs_build_time": float(step_info.get("global_rhs_build_time", 0.0)),
+            "petsc_object_setup_time": float(step_info.get("petsc_object_setup_time", 0.0)),
+            "ksp_setup_time": float(step_info.get("ksp_setup_time", 0.0)),
+            "ksp_solve_time": float(step_info.get("ksp_solve_time", 0.0)),
+            "linear_solve_time": float(step_info.get("linear_solve_time", 0.0)),
+            "state_update_time": float(step_info.get("state_update_time", 0.0)),
+            "newton_step_walltime": float(step_info.get("newton_step_walltime", 0.0)),
             "residual_norm": float(step_info["residual_norm"]),
             "increment_norm": float(step_info["increment_norm"]),
             "active_contact_points": int(step_info["active_contact_points"]),
@@ -963,6 +2068,19 @@ def solve_monolithic_contact_loadpath(
             "mesh_resolution": dof_layout["mesh_resolution"],
             "ndof_u": dof_layout["ndof_u"],
             "ndof_phi": dof_layout["ndof_phi"],
+            "nnz_global": int(step_info.get("nnz_global", 0)),
+            "nnz_Juu": int(step_info.get("nnz_Juu", 0)),
+            "nnz_Juphi": int(step_info.get("nnz_Juphi", 0)),
+            "nnz_Jphiu": int(step_info.get("nnz_Jphiu", 0)),
+            "nnz_Jphiphi": int(step_info.get("nnz_Jphiphi", 0)),
+            "reused_global_matrix": bool(step_info.get("reused_global_matrix", False)),
+            "reused_global_rhs_vec": bool(step_info.get("reused_global_rhs_vec", False)),
+            "reused_ksp": bool(step_info.get("reused_ksp", False)),
+            "reused_fieldsplit_is": bool(step_info.get("reused_fieldsplit_is", False)),
+            "reused_subksp": bool(step_info.get("reused_subksp", False)),
+            "reuse_attempted": bool(step_info.get("reuse_attempted", False)),
+            "reuse_failed_stage": step_info.get("reuse_failed_stage", ""),
+            "reuse_failure_message": step_info.get("reuse_failure_message", ""),
             "linear_iterations_list": [
                 int(item.get("linear_iterations", 0)) for item in step_info.get("history", [])
             ],
@@ -981,6 +2099,290 @@ def solve_monolithic_contact_loadpath(
                 float(item.get("relative_linear_reduction", 0.0))
                 for item in step_info.get("history", [])
             ],
+            "assembly_time_list": [
+                float(item.get("assembly_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "struct_block_assembly_time_list": [
+                float(item.get("struct_block_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_block_assembly_time_list": [
+                float(item.get("contact_block_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_block_assembly_time_list": [
+                float(item.get("phi_block_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_quadrature_loop_time_list": [
+                float(item.get("contact_quadrature_loop_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_geometry_eval_time_list": [
+                float(item.get("contact_geometry_eval_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_query_time_list": [
+                float(item.get("contact_query_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_gap_normal_eval_time_list": [
+                float(item.get("contact_gap_normal_eval_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_active_filter_time_list": [
+                float(item.get("contact_active_filter_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_local_residual_time_list": [
+                float(item.get("contact_local_residual_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_local_tangent_uu_time_list": [
+                float(item.get("contact_local_tangent_uu_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_local_tangent_uphi_time_list": [
+                float(item.get("contact_local_tangent_uphi_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_geometry_eval_call_count_list": [
+                int(item.get("contact_geometry_eval_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_geometry_eval_avg_time_list": [
+                float(item.get("contact_geometry_eval_avg_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_query_avg_time_list": [
+                float(item.get("contact_query_avg_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_query_call_count_list": [
+                int(item.get("contact_query_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_query_cache_hit_count_list": [
+                int(item.get("contact_query_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_query_cache_miss_count_list": [
+                int(item.get("contact_query_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_sensitivity_call_count_list": [
+                int(item.get("contact_sensitivity_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_sensitivity_cache_hit_count_list": [
+                int(item.get("contact_sensitivity_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_sensitivity_cache_miss_count_list": [
+                int(item.get("contact_sensitivity_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_sensitivity_time_list": [
+                float(item.get("contact_sensitivity_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_sensitivity_avg_time_list": [
+                float(item.get("contact_sensitivity_avg_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_local_tangent_uphi_call_count_list": [
+                int(item.get("contact_local_tangent_uphi_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_local_tangent_uu_call_count_list": [
+                int(item.get("contact_local_tangent_uu_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "cell_geometry_cache_hit_count_list": [
+                int(item.get("cell_geometry_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "cell_geometry_cache_miss_count_list": [
+                int(item.get("cell_geometry_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "function_cell_dof_cache_hit_count_list": [
+                int(item.get("function_cell_dof_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "function_cell_dof_cache_miss_count_list": [
+                int(item.get("function_cell_dof_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "vector_subfunction_cache_hit_count_list": [
+                int(item.get("vector_subfunction_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "vector_subfunction_cache_miss_count_list": [
+                int(item.get("vector_subfunction_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_scatter_to_global_time_list": [
+                float(item.get("contact_scatter_to_global_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_assembly_time_list": [
+                float(item.get("phi_form_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_extract_time_list": [
+                float(item.get("phi_matrix_extract_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_convert_time_list": [
+                float(item.get("phi_matrix_convert_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_rhs_assembly_time_list": [
+                float(item.get("phi_rhs_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_rhs_extract_time_list": [
+                float(item.get("phi_rhs_extract_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_extract_or_convert_time_list": [
+                float(item.get("phi_matrix_extract_or_convert_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_rhs_extract_or_convert_time_list": [
+                float(item.get("phi_rhs_extract_or_convert_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_dof_lookup_time_list": [
+                float(item.get("phi_dof_lookup_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_geometry_helper_time_list": [
+                float(item.get("phi_geometry_helper_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_basis_tabulation_time_list": [
+                float(item.get("phi_basis_tabulation_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_call_count_list": [
+                int(item.get("phi_form_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_cache_hit_count_list": [
+                int(item.get("phi_form_cache_hit_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_cache_miss_count_list": [
+                int(item.get("phi_form_cache_miss_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_extract_call_count_list": [
+                int(item.get("phi_matrix_extract_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_convert_call_count_list": [
+                int(item.get("phi_matrix_convert_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_rhs_extract_call_count_list": [
+                int(item.get("phi_rhs_extract_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_dof_lookup_call_count_list": [
+                int(item.get("phi_dof_lookup_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_basis_tabulation_call_count_list": [
+                int(item.get("phi_basis_tabulation_call_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_residual_form_assembly_time_list": [
+                float(item.get("phi_residual_form_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_residual_extract_time_list": [
+                float(item.get("phi_residual_extract_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiu_form_assembly_time_list": [
+                float(item.get("phi_kphiu_form_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiu_extract_time_list": [
+                float(item.get("phi_kphiu_extract_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiu_convert_time_list": [
+                float(item.get("phi_kphiu_convert_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiphi_form_assembly_time_list": [
+                float(item.get("phi_kphiphi_form_assembly_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiphi_extract_time_list": [
+                float(item.get("phi_kphiphi_extract_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_kphiphi_convert_time_list": [
+                float(item.get("phi_kphiphi_convert_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "dofmap_lookup_time_list": [
+                float(item.get("dofmap_lookup_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "surface_entity_iteration_time_list": [
+                float(item.get("surface_entity_iteration_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "basis_eval_or_tabulation_time_list": [
+                float(item.get("basis_eval_or_tabulation_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "numpy_temp_allocation_time_list": [
+                float(item.get("numpy_temp_allocation_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "block_build_time_list": [
+                float(item.get("block_build_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "bc_elimination_time_list": [
+                float(item.get("bc_elimination_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "global_matrix_allocation_time_list": [
+                float(item.get("global_matrix_allocation_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "global_matrix_fill_time_list": [
+                float(item.get("global_matrix_fill_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "global_rhs_build_time_list": [
+                float(item.get("global_rhs_build_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "petsc_object_setup_time_list": [
+                float(item.get("petsc_object_setup_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "ksp_setup_time_list": [
+                float(item.get("ksp_setup_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "ksp_solve_time_list": [
+                float(item.get("ksp_solve_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "linear_solve_time_list": [
+                float(item.get("linear_solve_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "state_update_time_list": [
+                float(item.get("state_update_time", 0.0)) for item in step_info.get("history", [])
+            ],
+            "newton_step_walltime_list": [
+                float(item.get("newton_step_walltime", 0.0)) for item in step_info.get("history", [])
+            ],
             "cutback_level": int(step_data.get("cutback_level", 0)),
             "step_length": float(step_info.get("step_length", 0.0)),
             "cutback_triggered": False,
@@ -991,7 +2393,9 @@ def solve_monolithic_contact_loadpath(
             "final_accepted_load": accepted_load_before_step,
             "reached_final_target": False,
             "output_index": output_index,
+            "load_step_walltime": float(time.perf_counter() - load_step_t0),
         }
+        total_newton_steps_used += int(step_info["newton_iterations"])
 
         if step_info["converged"]:
             accepted_state_index += 1
@@ -1003,6 +2407,29 @@ def solve_monolithic_contact_loadpath(
             accepted_load = attempt_load
             output_index += 1
             index += 1
+            accepted_nonzero_step_count = sum(
+                1 for item in accepted_history if abs(float(item["load_value"])) > 1e-14
+            )
+            if stop_after_first_nonzero_accepted_step and abs(attempt_load) > 1e-14:
+                terminated_early = True
+                termination_reason = "Stopped after first nonzero accepted step"
+                termination_category = "terminated_by_step_limit"
+                break
+            if max_load_steps is not None and accepted_nonzero_step_count >= int(max_load_steps):
+                terminated_early = True
+                termination_reason = f"Reached max_load_steps={int(max_load_steps)}"
+                termination_category = "terminated_by_step_limit"
+                break
+            if max_newton_steps is not None and total_newton_steps_used >= int(max_newton_steps):
+                terminated_early = True
+                termination_reason = f"Reached max_newton_steps={int(max_newton_steps)}"
+                termination_category = "terminated_by_step_limit"
+                break
+            if max_walltime_seconds is not None and (time.perf_counter() - start_walltime) >= float(max_walltime_seconds):
+                terminated_early = True
+                termination_reason = "Reached max_walltime_seconds after accepted step"
+                termination_category = "terminated_by_walltime"
+                break
             continue
 
         _restore_state_fields(state0, snapshot)
@@ -1022,6 +2449,7 @@ def solve_monolithic_contact_loadpath(
             attempt_history.append(history_item)
             terminated_early = True
             termination_reason = step_info["failure_reason"]
+            termination_category = "terminated_by_nonconvergence"
             break
 
         midpoint = accepted_load_before_step + 0.5 * (attempt_load - accepted_load_before_step)
@@ -1043,6 +2471,15 @@ def solve_monolithic_contact_loadpath(
         termination_reason,
     )
     result.update(dof_layout)
+    result["completed_full_run"] = bool(
+        not terminated_early and result["reached_final_target"]
+    )
+    result["terminated_by_walltime"] = termination_category == "terminated_by_walltime"
+    result["terminated_by_step_limit"] = termination_category == "terminated_by_step_limit"
+    result["terminated_by_nonconvergence"] = termination_category == "terminated_by_nonconvergence"
+    result["termination_category"] = termination_category
+    result["total_newton_steps_used"] = int(total_newton_steps_used)
+    result["total_walltime"] = float(time.perf_counter() - start_walltime)
     for item in attempt_history:
         item["terminated_early"] = result["terminated_early"]
         item["termination_reason"] = result["termination_reason"]

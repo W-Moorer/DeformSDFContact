@@ -1,0 +1,175 @@
+{
+  "comparison_4x4_gmres_ilu": {
+    "fractional_reduction": {
+      "contact_block_assembly_time": 0.5376368892161396,
+      "phi_block_assembly_time": 0.10044565131644954,
+      "total_assembly_time": 0.5173141188694645,
+      "total_newton_step_walltime": 0.40786033183314396
+    },
+    "new_assembly_optimized": {
+      "total_assembly_time": 1.0918215969999778,
+      "total_block_build_time": 1.3092657049999872,
+      "total_contact_block_assembly_time": 0.9916099759999781,
+      "total_newton_step_walltime": 3.7213522019999914,
+      "total_phi_block_assembly_time": 1.1886401329999927
+    },
+    "old_optimized": {
+      "total_assembly_time": 2.2619712730000288,
+      "total_block_build_time": 1.4444922729998666,
+      "total_contact_block_assembly_time": 2.1446563379999475,
+      "total_newton_step_walltime": 6.284585211999968,
+      "total_phi_block_assembly_time": 1.3213655569999787
+    }
+  },
+  "comparison_4x4_schur_lower_safe": {
+    "fractional_reduction": {
+      "total_assembly_time": 0.46304016759780203,
+      "total_newton_step_walltime": 0.26696502943324246
+    },
+    "new_safe": {
+      "total_assembly_time": 1.1407314520000682,
+      "total_block_build_time": 1.3657607220000045,
+      "total_ksp_setup_time": 1.4546241479998798,
+      "total_newton_step_walltime": 5.097594602999948
+    },
+    "old_safe": {
+      "total_assembly_time": 2.1244260429998576,
+      "total_block_build_time": 1.3566460249999182,
+      "total_newton_step_walltime": 6.954094699000052
+    }
+  },
+  "environment": {
+    "dolfinx_version": "0.3.0",
+    "petsc4py_version": "3.15.1",
+    "petsc_version": "3.15.5",
+    "python_path": "/usr/bin/python3",
+    "python_version": "3.10.12"
+  },
+  "schur_reuse_boundary": {
+    "safe_cases": [
+      {
+        "note": "IS-only reuse is safe; no KSP reuse, no matrix-pattern reuse.",
+        "reuse_fieldsplit_is": true,
+        "reuse_ksp": false,
+        "reuse_matrix_pattern": false,
+        "status": "safe"
+      },
+      {
+        "note": "Matrix-pattern reuse with fresh KSP is safe.",
+        "reuse_fieldsplit_is": false,
+        "reuse_ksp": false,
+        "reuse_matrix_pattern": true,
+        "status": "safe"
+      },
+      {
+        "note": "Current safe optimized Schur lower path.",
+        "reuse_fieldsplit_is": true,
+        "reuse_ksp": false,
+        "reuse_matrix_pattern": true,
+        "status": "safe"
+      }
+    ],
+    "unsafe_cases": [
+      {
+        "crash_stage": "during _configure_ksp_for_fieldsplit on reused KSP",
+        "reuse_fieldsplit_is": false,
+        "reuse_ksp": true,
+        "reuse_matrix_pattern": true,
+        "status": "SIGSEGV"
+      },
+      {
+        "crash_stage": "during KSP reuse path; matrix-pattern reuse not required for crash",
+        "reuse_fieldsplit_is": true,
+        "reuse_ksp": true,
+        "reuse_matrix_pattern": false,
+        "status": "SIGSEGV"
+      }
+    ]
+  },
+  "single_newton_5x5": {
+    "gmres_ilu": {
+      "block_pc_name": "global_ilu",
+      "build_path": "optimized",
+      "final_max_penetration": 0.020000000000155824,
+      "final_reaction_norm": 0.0032598816648626767,
+      "final_residual_norm": 2.7569910990471217e-05,
+      "ksp_type": "gmres",
+      "linear_solver_mode": "krylov",
+      "mesh_resolution": "5x5x5",
+      "mode": "baseline",
+      "ndof_phi": 1331,
+      "ndof_u": 648,
+      "newton_iterations": 1,
+      "pc_type": "ilu",
+      "single_newton_benchmark": true,
+      "target_load": 0.02,
+      "total_assembly_time": 1.7291341760000307,
+      "total_basis_eval_or_tabulation_time": 0.011613691999741604,
+      "total_block_build_time": 0.42418960800000605,
+      "total_contact_active_filter_time": 0.0002401929999962249,
+      "total_contact_block_assembly_time": 1.69451027300002,
+      "total_contact_gap_normal_eval_time": 0.00017720800013876215,
+      "total_contact_geometry_eval_time": 1.4097590340001602,
+      "total_contact_local_residual_time": 0.0005260860000930734,
+      "total_contact_local_tangent_uphi_time": 0.18262659300003747,
+      "total_contact_local_tangent_uu_time": 0.07822928900014858,
+      "total_contact_quadrature_loop_time": 1.4103619790000153,
+      "total_contact_scatter_to_global_time": 2.9865000044537737e-05,
+      "total_dofmap_lookup_time": 0.00027941100009343245,
+      "total_dofs": 1979,
+      "total_ksp_setup_time": 7.462900001087291e-05,
+      "total_ksp_solve_time": 0.35603731099999436,
+      "total_linear_iterations": 1,
+      "total_linear_solve_time": 0.3562203519999798,
+      "total_newton_step_walltime": 4.028825554999997,
+      "total_numpy_temp_allocation_time": 0.025178321999732134,
+      "total_phi_block_assembly_time": 0.32720714399999906,
+      "total_phi_form_assembly_time": 0.3086339470000041,
+      "total_phi_matrix_extract_or_convert_time": 0.3065678469999966,
+      "total_phi_rhs_extract_or_convert_time": 0.01483485100001758,
+      "total_surface_entity_iteration_time": 1.4102795099999241
+    },
+    "schur_lower_safe": {
+      "block_pc_name": "fieldsplit_schur_lower_selfp_ilu",
+      "build_path": "optimized",
+      "final_max_penetration": 0.020000000000156167,
+      "final_reaction_norm": 0.003259881664862601,
+      "final_residual_norm": 2.7569911995819792e-05,
+      "ksp_type": "gmres",
+      "linear_solver_mode": "krylov",
+      "mesh_resolution": "5x5x5",
+      "mode": "baseline",
+      "ndof_phi": 1331,
+      "ndof_u": 648,
+      "newton_iterations": 1,
+      "pc_type": "fieldsplit",
+      "single_newton_benchmark": true,
+      "target_load": 0.02,
+      "total_assembly_time": 1.7337358959999847,
+      "total_basis_eval_or_tabulation_time": 0.011673300999746061,
+      "total_block_build_time": 0.4293704410000032,
+      "total_contact_active_filter_time": 0.00025634600007151676,
+      "total_contact_block_assembly_time": 1.698410478999989,
+      "total_contact_gap_normal_eval_time": 0.00016923000006840994,
+      "total_contact_geometry_eval_time": 1.4141203420001034,
+      "total_contact_local_residual_time": 0.0005351110000049175,
+      "total_contact_local_tangent_uphi_time": 0.17884880200003295,
+      "total_contact_local_tangent_uu_time": 0.08313435399992386,
+      "total_contact_quadrature_loop_time": 1.4147223699999927,
+      "total_contact_scatter_to_global_time": 3.2418000188272345e-05,
+      "total_dofmap_lookup_time": 0.00032249999995315193,
+      "total_dofs": 1979,
+      "total_ksp_setup_time": 1.3005521219999991,
+      "total_ksp_solve_time": 0.16819406400000503,
+      "total_linear_iterations": 2,
+      "total_linear_solve_time": 1.4688590370000156,
+      "total_newton_step_walltime": 5.298424202999996,
+      "total_numpy_temp_allocation_time": 0.024083512000174778,
+      "total_phi_block_assembly_time": 0.3328969890000053,
+      "total_phi_form_assembly_time": 0.3136463350000156,
+      "total_phi_matrix_extract_or_convert_time": 0.31043671399999084,
+      "total_phi_rhs_extract_or_convert_time": 0.015412671999996519,
+      "total_surface_entity_iteration_time": 1.4146362930002283
+    }
+  }
+}

@@ -112,6 +112,17 @@ def summarize_row(case_label, mode, mesh_kwargs, cfg, summary):
         "total_newton_iterations": summary["total_newton_iterations_accepted"],
         "total_linear_iterations": summary["total_linear_iterations_accepted"],
         "avg_linear_iterations_per_newton": summary["avg_linear_iterations_per_newton"],
+        "completed_full_run": bool(summary.get("completed_full_run", False)),
+        "terminated_by_walltime": bool(summary.get("terminated_by_walltime", False)),
+        "terminated_by_step_limit": bool(summary.get("terminated_by_step_limit", False)),
+        "terminated_by_nonconvergence": bool(summary.get("terminated_by_nonconvergence", False)),
+        "termination_category": summary.get("termination_category", ""),
+        "total_walltime": summary.get("total_walltime", 0.0),
+        "total_assembly_time": summary.get("total_assembly_time_accepted", 0.0),
+        "total_block_build_time": summary.get("total_block_build_time_accepted", 0.0),
+        "total_linear_solve_time": summary.get("total_linear_solve_time_accepted", 0.0),
+        "total_state_update_time": summary.get("total_state_update_time_accepted", 0.0),
+        "total_newton_step_walltime": summary.get("total_newton_step_walltime_accepted", 0.0),
         "cutback_count": summary["cutback_count"],
         "final_residual_norm": summary["final_residual_norm"],
         "final_reaction_norm": summary["final_reaction_norm"],
@@ -129,16 +140,19 @@ def print_case_header(case_label, mode, mesh_kwargs):
     print(f"  mode = {mode}")
     print(f"  mesh = {mesh_kwargs['nx']}x{mesh_kwargs['ny']}x{mesh_kwargs['nz']}")
     print(
-        "  solver | converged | ndof_u | ndof_phi | total_newton | total_linear | "
-        "avg_linear_per_newton | cutbacks | final_residual | final_reaction | "
+        "  solver | converged | completed_full_run | term_category | ndof_u | ndof_phi | "
+        "total_newton | total_linear | avg_linear_per_newton | total_walltime | "
+        "linear_solve_time | cutbacks | final_residual | final_reaction | "
         "final_max_penetration | ksp_reason_histogram"
     )
 
 
 def print_row(row):
     print(
-        "  {solver_label} | {converged} | {ndof_u} | {ndof_phi} | {total_newton_iterations} | "
-        "{total_linear_iterations} | {avg_linear_iterations_per_newton:.3f} | {cutback_count} | "
+        "  {solver_label} | {converged} | {completed_full_run} | {termination_category} | "
+        "{ndof_u} | {ndof_phi} | {total_newton_iterations} | "
+        "{total_linear_iterations} | {avg_linear_iterations_per_newton:.3f} | "
+        "{total_walltime:.3f} | {total_linear_solve_time:.3f} | {cutback_count} | "
         "{final_residual_norm:.6e} | {final_reaction_norm:.6e} | {final_max_penetration:.6e} | "
         "{ksp_reason_histogram}".format(**row)
     )
@@ -151,6 +165,11 @@ def main():
     parser.add_argument("--skip-additive", action="store_true")
     parser.add_argument("--skip-symmetric", action="store_true")
     parser.add_argument("--skip-schur", action="store_true")
+    parser.add_argument("--partial", action="store_true")
+    parser.add_argument("--max-load-steps", type=int, default=None)
+    parser.add_argument("--max-newton-steps", type=int, default=None)
+    parser.add_argument("--max-walltime-seconds", type=float, default=None)
+    parser.add_argument("--stop-after-first-nonzero-accepted-step", action="store_true")
     args = parser.parse_args()
 
     recommended = recommended_monolithic_contact_options()
@@ -176,6 +195,14 @@ def main():
     print(f"max_newton_iter = {recommended['max_newton_iter']}")
     print(f"line_search = {recommended['line_search']}")
     print(f"initial_damping = {recommended['initial_damping']}")
+    print(f"partial = {args.partial}")
+    print(f"max_load_steps = {args.max_load_steps}")
+    print(f"max_newton_steps = {args.max_newton_steps}")
+    print(f"max_walltime_seconds = {args.max_walltime_seconds}")
+    print(
+        f"stop_after_first_nonzero_accepted_step = "
+        f"{args.stop_after_first_nonzero_accepted_step}"
+    )
     print("")
 
     for case_label, mode, mesh_kwargs in cases:
@@ -199,6 +226,10 @@ def main():
                     max_newton_iter=recommended["max_newton_iter"],
                     line_search=recommended["line_search"],
                     damping=recommended["initial_damping"],
+                    max_load_steps=args.max_load_steps,
+                    max_newton_steps=args.max_newton_steps,
+                    max_walltime_seconds=args.max_walltime_seconds,
+                    stop_after_first_nonzero_accepted_step=args.stop_after_first_nonzero_accepted_step,
                     write_outputs=False,
                     verbose=False,
                 )

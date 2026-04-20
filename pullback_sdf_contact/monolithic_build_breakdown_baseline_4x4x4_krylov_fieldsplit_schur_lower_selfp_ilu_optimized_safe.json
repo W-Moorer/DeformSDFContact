@@ -1,0 +1,88 @@
+{
+  "avg_linear_iterations_per_newton": 2.1666666666666665,
+  "block_build_time_per_load": [
+    [
+      0.2248493789999202,
+      0.23288075599998592,
+      0.22623040199994193
+    ],
+    [
+      0.22459364600001663,
+      0.2235759989999906,
+      0.2245158430000629
+    ]
+  ],
+  "block_pc_name": "fieldsplit_schur_lower_selfp_ilu",
+  "build_path": "optimized_matrix_reuse_only",
+  "final_accepted_load": 0.04,
+  "final_max_penetration": 0.0400000000007671,
+  "final_reaction_norm": 0.007481773054649274,
+  "final_residual_norm": 2.207762853477199e-09,
+  "ksp_reasons_per_load": [
+    [
+      3,
+      3,
+      3
+    ],
+    [
+      3,
+      3,
+      3
+    ]
+  ],
+  "ksp_setup_time_per_load": [
+    [
+      0.2713146730000062,
+      0.23349140699997406,
+      0.2316172619999861
+    ],
+    [
+      0.23045408600000883,
+      0.23247922099994867,
+      0.23183153499996934
+    ]
+  ],
+  "ksp_solve_time_per_load": [
+    [
+      0.034748998999930336,
+      0.033314765999989504,
+      0.03293091099999401
+    ],
+    [
+      0.034872820000032334,
+      0.033911708999994516,
+      0.03427498500002457
+    ]
+  ],
+  "ksp_type": "gmres",
+  "linear_iterations_per_load": [
+    [
+      2,
+      2,
+      2
+    ],
+    [
+      3,
+      2,
+      2
+    ]
+  ],
+  "linear_solver_mode": "krylov",
+  "loads": [
+    0.02,
+    0.04
+  ],
+  "mesh_resolution": "4x4x4",
+  "mode": "baseline",
+  "ndof_phi": 729,
+  "ndof_u": 375,
+  "notes": "Safe optimized variant for Schur lower: reuse_matrix_pattern=True, reuse_ksp=False. Full KSP reuse caused PETSc SEGV on 4x4 baseline.",
+  "pc_type": "fieldsplit",
+  "total_assembly_time": 2.1244260429998576,
+  "total_block_build_time": 1.3566460249999182,
+  "total_dofs": 1104,
+  "total_linear_iterations": 13,
+  "total_linear_solve_time": 1.6481268349998572,
+  "total_newton_iterations": 6,
+  "total_newton_step_walltime": 6.954094699000052
+}
