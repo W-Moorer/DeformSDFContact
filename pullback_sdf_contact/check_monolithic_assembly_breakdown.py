@@ -9,6 +9,7 @@ from check_indenter_block_contact import build_indenter_state, build_load_schedu
 from check_monolithic_contact import run_monolithic_case
 from coupled_solver.monolithic import (
     _apply_step_data,
+    _prime_phi_cache,
     get_petsc_runtime_info,
     monolithic_block_pc_names,
     recommended_monolithic_contact_options,
@@ -64,6 +65,11 @@ def _rows_from_result(result, summary):
                 "load_value": item.get("load_value", 0.0),
                 "newton_iteration_within_load": idx + 1,
             }
+            def _list_value(name, default=0.0):
+                values = item.get(f"{name}_list", [])
+                if idx < len(values):
+                    return values[idx]
+                return default
             for key in (
                 "linear_iterations",
                 "ksp_reason",
@@ -128,6 +134,22 @@ def _rows_from_result(result, summary):
                 "phi_kphiphi_form_assembly_time",
                 "phi_kphiphi_extract_time",
                 "phi_kphiphi_convert_time",
+                "phi_form_time_R_phi",
+                "phi_form_time_K_phi_u",
+                "phi_form_time_K_phi_phi",
+                "phi_extract_time_K_phi_u",
+                "phi_convert_time_K_phi_u",
+                "phi_extract_time_K_phi_phi",
+                "phi_convert_time_K_phi_phi",
+                "phi_form_call_count_R_phi",
+                "phi_form_call_count_K_phi_u",
+                "phi_form_call_count_K_phi_phi",
+                "phi_matrix_extract_call_count_K_phi_u",
+                "phi_matrix_convert_call_count_K_phi_u",
+                "phi_matrix_extract_call_count_K_phi_phi",
+                "phi_matrix_convert_call_count_K_phi_phi",
+                "phi_scatter_pattern_build_time",
+                "phi_scatter_pattern_build_count",
                 "dofmap_lookup_time",
                 "surface_entity_iteration_time",
                 "basis_eval_or_tabulation_time",
@@ -144,7 +166,7 @@ def _rows_from_result(result, summary):
                 "state_update_time",
                 "newton_step_walltime",
             ):
-                row[key] = item.get(f"{key}_list", [])[idx]
+                row[key] = _list_value(key)
             for key in (
                 "reused_global_matrix",
                 "reused_global_rhs_vec",
@@ -204,6 +226,14 @@ def _summary_from_rows(summary, rows):
         "phi_kphiphi_form_assembly_time",
         "phi_kphiphi_extract_time",
         "phi_kphiphi_convert_time",
+        "phi_form_time_R_phi",
+        "phi_form_time_K_phi_u",
+        "phi_form_time_K_phi_phi",
+        "phi_extract_time_K_phi_u",
+        "phi_convert_time_K_phi_u",
+        "phi_extract_time_K_phi_phi",
+        "phi_convert_time_K_phi_phi",
+        "phi_scatter_pattern_build_time",
         "dofmap_lookup_time",
         "surface_entity_iteration_time",
         "basis_eval_or_tabulation_time",
@@ -240,6 +270,14 @@ def _summary_from_rows(summary, rows):
         "phi_rhs_extract_call_count",
         "phi_dof_lookup_call_count",
         "phi_basis_tabulation_call_count",
+        "phi_form_call_count_R_phi",
+        "phi_form_call_count_K_phi_u",
+        "phi_form_call_count_K_phi_phi",
+        "phi_matrix_extract_call_count_K_phi_u",
+        "phi_matrix_convert_call_count_K_phi_u",
+        "phi_matrix_extract_call_count_K_phi_phi",
+        "phi_matrix_convert_call_count_K_phi_phi",
+        "phi_scatter_pattern_build_count",
     )
     for key in int_keys:
         totals[f"total_{key}"] = int(sum(row.get(key, 0) for row in rows))
@@ -282,6 +320,9 @@ def _run_single_newton(args, resolved):
     )
     nonzero_step = next(step for step in load_schedule if abs(float(step["load_value"])) > 1e-14)
     _apply_step_data(state, nonzero_step)
+    phi_cache_prime_time = 0.0
+    if args.build_path == "optimized" and args.phi_cache_prime:
+        phi_cache_prime_time = _prime_phi_cache(state)
     _, info = solve_monolithic_contact(
         state,
         solver_cfg,
@@ -301,6 +342,9 @@ def _run_single_newton(args, resolved):
         line_search=resolved["line_search"],
         initial_damping=resolved["damping"],
         profile_assembly_detail=args.profile_assembly_detail,
+        phi_scatter_reuse=args.phi_scatter_reuse,
+        profile_phi_detail=(args.phi_profile_mode == "full"),
+        phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
         verbose=False,
     )
     rows = []
@@ -308,6 +352,14 @@ def _run_single_newton(args, resolved):
         row_copy = dict(row)
         row_copy["mode"] = args.mode
         row_copy["load_value"] = float(nonzero_step["load_value"])
+        for key in (
+            "phi_form_time_R_phi",
+            "phi_form_time_K_phi_u",
+            "phi_form_time_K_phi_phi",
+            "phi_convert_time_K_phi_u",
+            "phi_convert_time_K_phi_phi",
+        ):
+            row_copy.setdefault(key, 0.0)
         rows.append(row_copy)
     summary = {
         "mode": args.mode,
@@ -321,6 +373,11 @@ def _run_single_newton(args, resolved):
         "ndof_phi": state["phi"].vector.getLocalSize(),
         "total_dofs": state["u"].vector.getLocalSize() + state["phi"].vector.getLocalSize(),
         "single_newton_benchmark": True,
+        "phi_scatter_reuse": bool(args.phi_scatter_reuse),
+        "phi_profile_mode": args.phi_profile_mode,
+        "phi_matrix_assembly_backend": args.phi_matrix_assembly_backend,
+        "phi_cache_prime_enabled": bool(args.phi_cache_prime),
+        "phi_cache_prime_time": float(phi_cache_prime_time),
         "target_load": float(nonzero_step["load_value"]),
         "newton_iterations": int(info.get("newton_iterations", 0)),
         "total_linear_iterations": int(info.get("total_linear_iterations", 0)),
@@ -357,11 +414,20 @@ def _run_loadpath(args, resolved):
         max_newton_steps=args.max_newton_steps,
         max_walltime_seconds=args.max_walltime_seconds,
         profile_assembly_detail=args.profile_assembly_detail,
+        phi_cache_prime=args.phi_cache_prime,
+        phi_scatter_reuse=args.phi_scatter_reuse,
+        phi_profile_mode=args.phi_profile_mode,
+        phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
         write_outputs=False,
         verbose=False,
     )
     rows = _rows_from_result(result, summary)
-    return _summary_from_rows(summary, rows), rows
+    summary = _summary_from_rows(summary, rows)
+    summary["phi_cache_prime_enabled"] = bool(args.phi_cache_prime)
+    summary["phi_scatter_reuse"] = bool(args.phi_scatter_reuse)
+    summary["phi_profile_mode"] = args.phi_profile_mode
+    summary["phi_matrix_assembly_backend"] = args.phi_matrix_assembly_backend
+    return summary, rows
 
 
 def _print_summary(summary, rows):
@@ -371,6 +437,14 @@ def _print_summary(summary, rows):
     print(f"ndof_phi = {summary['ndof_phi']}")
     print(f"total_dofs = {summary['total_dofs']}")
     print(f"build_path = {summary['build_path']}")
+    if "phi_cache_prime_enabled" in summary:
+        print(f"phi_cache_prime_enabled = {summary['phi_cache_prime_enabled']}")
+    if "phi_scatter_reuse" in summary:
+        print(f"phi_scatter_reuse = {summary['phi_scatter_reuse']}")
+    if "phi_profile_mode" in summary:
+        print(f"phi_profile_mode = {summary['phi_profile_mode']}")
+    if "phi_matrix_assembly_backend" in summary:
+        print(f"phi_matrix_assembly_backend = {summary['phi_matrix_assembly_backend']}")
     print(f"linear_solver_mode = {summary['linear_solver_mode']}")
     print(f"ksp_type = {summary['ksp_type']}")
     print(f"pc_type = {summary['pc_type']}")
@@ -388,6 +462,7 @@ def _print_summary(summary, rows):
     print(f"final_reaction_norm = {summary['final_reaction_norm']}")
     print(f"final_max_penetration = {summary['final_max_penetration']}")
     for key in (
+        "phi_cache_prime_time",
         "total_contact_block_assembly_time",
         "total_phi_block_assembly_time",
         "total_contact_quadrature_loop_time",
@@ -402,6 +477,14 @@ def _print_summary(summary, rows):
         "total_phi_matrix_convert_time",
         "total_phi_rhs_assembly_time",
         "total_phi_rhs_extract_time",
+        "total_phi_form_time_R_phi",
+        "total_phi_form_time_K_phi_u",
+        "total_phi_form_time_K_phi_phi",
+        "total_phi_extract_time_K_phi_u",
+        "total_phi_convert_time_K_phi_u",
+        "total_phi_extract_time_K_phi_phi",
+        "total_phi_convert_time_K_phi_phi",
+        "total_phi_scatter_pattern_build_time",
         "total_phi_matrix_extract_or_convert_time",
         "total_phi_rhs_extract_or_convert_time",
         "total_block_build_time",
@@ -431,16 +514,36 @@ def _print_summary(summary, rows):
         "total_phi_matrix_extract_call_count",
         "total_phi_matrix_convert_call_count",
         "total_phi_rhs_extract_call_count",
+        "total_phi_form_call_count_R_phi",
+        "total_phi_form_call_count_K_phi_u",
+        "total_phi_form_call_count_K_phi_phi",
+        "total_phi_matrix_extract_call_count_K_phi_u",
+        "total_phi_matrix_convert_call_count_K_phi_u",
+        "total_phi_matrix_extract_call_count_K_phi_phi",
+        "total_phi_matrix_convert_call_count_K_phi_phi",
+        "total_phi_scatter_pattern_build_count",
     ):
         if key in summary:
             print(f"{key} = {summary[key]}")
     print("per_newton_rows:")
     for row in rows:
+        row_display = dict(row)
+        for key in (
+            "phi_form_time_R_phi",
+            "phi_form_time_K_phi_u",
+            "phi_form_time_K_phi_phi",
+            "phi_convert_time_K_phi_u",
+            "phi_convert_time_K_phi_phi",
+        ):
+            row_display.setdefault(key, 0.0)
         print(
             "  load={load_value:.4f} newton={newton} "
             "lin_it={linear_iterations} ksp_reason={ksp_reason} "
             "asm={assembly_time:.4f}s contact={contact_block_assembly_time:.4f}s "
             "phi={phi_block_assembly_time:.4f}s phi_form={phi_form_assembly_time:.4f}s "
+            "Rphi_form={phi_form_time_R_phi:.4f}s "
+            "Kphiu_form={phi_form_time_K_phi_u:.4f}s Kphiu_conv={phi_convert_time_K_phi_u:.4f}s "
+            "Kphiphi_form={phi_form_time_K_phi_phi:.4f}s Kphiphi_conv={phi_convert_time_K_phi_phi:.4f}s "
             "phi_mextract={phi_matrix_extract_time:.4f}s phi_mconvert={phi_matrix_convert_time:.4f}s "
             "build={block_build_time:.4f}s "
             "ksp_setup={ksp_setup_time:.4f}s ksp_solve={ksp_solve_time:.4f}s "
@@ -450,8 +553,8 @@ def _print_summary(summary, rows):
             "res_before={outer_residual_norm_before_linear:.6e} "
             "res_after={outer_residual_norm_after_linear:.6e} "
             "red={relative_linear_reduction:.6e}".format(
-                newton=row.get("newton_iteration", row.get("newton_iteration_within_load", 0)),
-                **row,
+                newton=row_display.get("newton_iteration", row_display.get("newton_iteration_within_load", 0)),
+                **row_display,
             )
         )
 
@@ -484,6 +587,14 @@ def main():
     parser.add_argument("--reuse-ksp", type=_parse_bool, default=None)
     parser.add_argument("--reuse-matrix-pattern", type=_parse_bool, default=None)
     parser.add_argument("--reuse-fieldsplit-is", type=_parse_bool, default=None)
+    parser.add_argument("--phi-cache-prime", type=_parse_bool, default=None)
+    parser.add_argument("--phi-scatter-reuse", type=_parse_bool, default=None)
+    parser.add_argument("--phi-profile-mode", choices=["full", "light"], default=None)
+    parser.add_argument(
+        "--phi-matrix-assembly-backend",
+        choices=["python", "cpp_petsc"],
+        default=None,
+    )
     parser.add_argument("--max-load-steps", type=int, default=None)
     parser.add_argument("--max-newton-steps", type=int, default=None)
     parser.add_argument("--max-walltime-seconds", type=float, default=None)
@@ -539,19 +650,30 @@ def main():
             "line_search": recommended["line_search"],
             "damping": recommended["initial_damping"],
         }
+        if args.phi_cache_prime is None:
+            args.phi_cache_prime = bool(recommended["phi_cache_prime"])
+        if args.phi_scatter_reuse is None:
+            args.phi_scatter_reuse = bool(recommended["phi_scatter_reuse"])
+        if args.phi_profile_mode is None:
+            args.phi_profile_mode = str(recommended["phi_profile_mode"])
+        if args.phi_matrix_assembly_backend is None:
+            args.phi_matrix_assembly_backend = str(
+                recommended["phi_matrix_assembly_backend"]
+            )
 
         print(f"=== build_path = {build_path} ===")
         print(f"reuse_ksp = {reuse_ksp}")
         print(f"reuse_matrix_pattern = {reuse_matrix_pattern}")
         print(f"reuse_fieldsplit_is = {reuse_fieldsplit_is}")
+        print(f"phi_cache_prime = {args.phi_cache_prime}")
+        print(f"phi_scatter_reuse = {args.phi_scatter_reuse}")
+        print(f"phi_profile_mode = {args.phi_profile_mode}")
+        print(f"phi_matrix_assembly_backend = {args.phi_matrix_assembly_backend}")
         args.profile_assembly_detail = bool(
             args.profile_assembly_detail
             or args.profile_contact_geometry_detail
-            or args.profile_phi_detail
             or args.report_cache_stats
-            or args.report_phi_cache_stats
             or args.microbenchmark_contact_geometry
-            or args.microbenchmark_phi
         )
         if args.microbenchmark_contact_geometry or args.microbenchmark_phi:
             args.single_newton_benchmark = True
@@ -564,6 +686,12 @@ def main():
             f"monolithic_assembly_breakdown_{args.mode}_{summary['mesh_resolution']}_"
             f"{args.linear_solver}_{summary['block_pc_name']}_{build_path}"
         )
+        base_name += (
+            f"_phiPrime{int(bool(args.phi_cache_prime))}"
+            f"_scatter{int(bool(args.phi_scatter_reuse))}"
+            f"_phiProf{args.phi_profile_mode}"
+        )
+        base_name += f"_phiAsm{args.phi_matrix_assembly_backend}"
         if args.single_newton_benchmark:
             base_name += "_single_newton"
         _write_outputs(base_name, summary, rows)

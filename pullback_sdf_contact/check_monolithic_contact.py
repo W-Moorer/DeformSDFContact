@@ -26,6 +26,10 @@ def summarize_monolithic_result(
     ksp_type,
     pc_type,
     block_pc_name,
+    phi_cache_prime,
+    phi_scatter_reuse,
+    phi_profile_mode,
+    phi_matrix_assembly_backend,
 ):
     accepted_history = result["accepted_history"]
     final_accepted = accepted_history[-1] if accepted_history else None
@@ -90,6 +94,10 @@ def summarize_monolithic_result(
         "mode": mode,
         "backend": backend,
         "build_path": build_path,
+        "phi_cache_prime_enabled": bool(phi_cache_prime),
+        "phi_scatter_reuse": bool(phi_scatter_reuse),
+        "phi_profile_mode": str(phi_profile_mode),
+        "phi_matrix_assembly_backend": str(phi_matrix_assembly_backend),
         "mesh_resolution": result.get("mesh_resolution", ""),
         "ndof_u": int(result.get("ndof_u", 0)),
         "ndof_phi": int(result.get("ndof_phi", 0)),
@@ -123,6 +131,7 @@ def summarize_monolithic_result(
         "total_linear_solve_time_accepted": total_linear_solve_time_accepted,
         "total_state_update_time_accepted": total_state_update_time_accepted,
         "total_newton_step_walltime_accepted": total_newton_step_walltime_accepted,
+        "phi_cache_prime_time": float(result.get("phi_cache_prime_time", 0.0)),
         "final_residual_norm": 0.0 if final_accepted is None else float(final_accepted["residual_norm"]),
         "final_reaction_norm": 0.0 if final_accepted is None else float(final_accepted["reaction_norm"]),
         "final_max_penetration": 0.0 if final_accepted is None else float(final_accepted["max_penetration"]),
@@ -175,6 +184,10 @@ def run_monolithic_case(
     max_walltime_seconds=None,
     stop_after_first_nonzero_accepted_step=False,
     profile_assembly_detail=False,
+    phi_cache_prime=None,
+    phi_scatter_reuse=None,
+    phi_profile_mode=None,
+    phi_matrix_assembly_backend=None,
     write_outputs=True,
     verbose=False,
 ):
@@ -205,14 +218,31 @@ def run_monolithic_case(
     max_newton_iter = recommended["max_newton_iter"] if max_newton_iter is None else max_newton_iter
     line_search = recommended["line_search"] if line_search is None else bool(line_search)
     damping = recommended["initial_damping"] if damping is None else float(damping)
+    phi_cache_prime = recommended["phi_cache_prime"] if phi_cache_prime is None else bool(phi_cache_prime)
+    phi_scatter_reuse = (
+        recommended["phi_scatter_reuse"] if phi_scatter_reuse is None else bool(phi_scatter_reuse)
+    )
+    phi_profile_mode = (
+        recommended["phi_profile_mode"] if phi_profile_mode is None else str(phi_profile_mode)
+    )
+    phi_matrix_assembly_backend = (
+        recommended["phi_matrix_assembly_backend"]
+        if phi_matrix_assembly_backend is None
+        else str(phi_matrix_assembly_backend)
+    )
     max_backtracks = recommended["max_backtracks"] if max_backtracks is None else int(max_backtracks)
     backtrack_factor = (
         recommended["backtrack_factor"] if backtrack_factor is None else float(backtrack_factor)
     )
 
     mesh_resolution = state.get("mesh_resolution", "")
+    history_suffix = (
+        f"_phiPrime{int(bool(phi_cache_prime))}"
+        f"_scatter{int(bool(phi_scatter_reuse))}"
+        f"_phiProf{phi_profile_mode}"
+    )
     history_path = (
-        f"monolithic_history_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}.csv"
+        f"monolithic_history_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}{history_suffix}.csv"
     )
     final_state, result = solve_monolithic_contact_loadpath(
         state,
@@ -247,6 +277,10 @@ def run_monolithic_case(
         max_walltime_seconds=max_walltime_seconds,
         stop_after_first_nonzero_accepted_step=stop_after_first_nonzero_accepted_step,
         profile_assembly_detail=profile_assembly_detail,
+        phi_cache_prime=phi_cache_prime,
+        phi_scatter_reuse=phi_scatter_reuse,
+        profile_phi_detail=(phi_profile_mode == "full"),
+        phi_matrix_assembly_backend=phi_matrix_assembly_backend,
     )
     summary = summarize_monolithic_result(
         result,
@@ -260,6 +294,10 @@ def run_monolithic_case(
         ksp_type,
         pc_type,
         block_pc_name,
+        phi_cache_prime,
+        phi_scatter_reuse,
+        phi_profile_mode,
+        phi_matrix_assembly_backend,
     )
 
     phi_delta = final_state["phi"].vector.array_r - final_state["phi0"].vector.array_r
@@ -369,6 +407,14 @@ def main():
     parser.add_argument("--max-newton-steps", type=int, default=None)
     parser.add_argument("--max-walltime-seconds", type=float, default=None)
     parser.add_argument("--stop-after-first-nonzero-accepted-step", action="store_true")
+    parser.add_argument("--phi-cache-prime", choices=["true", "false"], default=None)
+    parser.add_argument("--phi-scatter-reuse", choices=["true", "false"], default=None)
+    parser.add_argument("--phi-profile-mode", choices=["full", "light"], default=None)
+    parser.add_argument(
+        "--phi-matrix-assembly-backend",
+        choices=["python", "cpp_petsc"],
+        default=None,
+    )
     args = parser.parse_args()
 
     modes = ["baseline", "aggressive"] if args.mode == "all" else [args.mode]
@@ -396,6 +442,10 @@ def main():
     resolved_ksp_max_it = (
         recommended["ksp_max_it"] if args.ksp_max_it is None else args.ksp_max_it
     )
+    resolved_phi_cache_prime = None if args.phi_cache_prime is None else args.phi_cache_prime == "true"
+    resolved_phi_scatter_reuse = (
+        None if args.phi_scatter_reuse is None else args.phi_scatter_reuse == "true"
+    )
     print("Monolithic contact regression")
     print("")
     print(f"mesh_scale = {args.mesh_scale}")
@@ -414,6 +464,10 @@ def main():
         f"stop_after_first_nonzero_accepted_step = "
         f"{args.stop_after_first_nonzero_accepted_step}"
     )
+    print(f"phi_cache_prime = {resolved_phi_cache_prime}")
+    print(f"phi_scatter_reuse = {resolved_phi_scatter_reuse}")
+    print(f"phi_profile_mode = {args.phi_profile_mode}")
+    print(f"phi_matrix_assembly_backend = {args.phi_matrix_assembly_backend}")
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
     print("")
@@ -439,6 +493,10 @@ def main():
             max_newton_steps=args.max_newton_steps,
             max_walltime_seconds=args.max_walltime_seconds,
             stop_after_first_nonzero_accepted_step=args.stop_after_first_nonzero_accepted_step,
+            phi_cache_prime=resolved_phi_cache_prime,
+            phi_scatter_reuse=resolved_phi_scatter_reuse,
+            phi_profile_mode=args.phi_profile_mode,
+            phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
             write_outputs=True,
             verbose=False,
         )

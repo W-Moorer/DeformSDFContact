@@ -3,7 +3,7 @@ import os
 import time
 import numpy as np
 
-from dolfinx import fem
+from dolfinx import cpp, fem
 from petsc4py import PETSc
 
 from contact_mechanics.assembled_surface import assemble_contact_contributions_surface
@@ -24,6 +24,10 @@ RECOMMENDED_MONOLITHIC_BLOCK_PC_NAME = "fieldsplit_multiplicative_ilu"
 RECOMMENDED_MONOLITHIC_KSP_RTOL = 1e-10
 RECOMMENDED_MONOLITHIC_KSP_ATOL = 1e-12
 RECOMMENDED_MONOLITHIC_KSP_MAX_IT = 400
+RECOMMENDED_MONOLITHIC_PHI_CACHE_PRIME = True
+RECOMMENDED_MONOLITHIC_PHI_SCATTER_REUSE = True
+RECOMMENDED_MONOLITHIC_PHI_PROFILE_MODE = "light"
+RECOMMENDED_MONOLITHIC_PHI_MATRIX_ASSEMBLY_BACKEND = "python"
 
 BLOCK_PC_CONFIGS = {
     "fieldsplit_additive_ilu": {
@@ -76,6 +80,10 @@ def recommended_monolithic_contact_options(**overrides):
         "ksp_rtol": RECOMMENDED_MONOLITHIC_KSP_RTOL,
         "ksp_atol": RECOMMENDED_MONOLITHIC_KSP_ATOL,
         "ksp_max_it": RECOMMENDED_MONOLITHIC_KSP_MAX_IT,
+        "phi_cache_prime": RECOMMENDED_MONOLITHIC_PHI_CACHE_PRIME,
+        "phi_scatter_reuse": RECOMMENDED_MONOLITHIC_PHI_SCATTER_REUSE,
+        "phi_profile_mode": RECOMMENDED_MONOLITHIC_PHI_PROFILE_MODE,
+        "phi_matrix_assembly_backend": RECOMMENDED_MONOLITHIC_PHI_MATRIX_ASSEMBLY_BACKEND,
     }
     options.update(overrides)
     return options
@@ -136,8 +144,8 @@ def _get_or_create_phi_form_cache(state):
     return cache
 
 
-def _phi_profile_template():
-    return {
+def _phi_profile_template(profile_phi_detail=False):
+    profile = {
         "phi_form_assembly_time": 0.0,
         "phi_matrix_extract_time": 0.0,
         "phi_matrix_convert_time": 0.0,
@@ -172,6 +180,28 @@ def _phi_profile_template():
         "reused_phi_kphiphi_mat": False,
         "reused_phi_dense_buffers": False,
     }
+    if profile_phi_detail:
+        profile.update(
+            {
+                "phi_form_time_R_phi": 0.0,
+                "phi_form_time_K_phi_u": 0.0,
+                "phi_form_time_K_phi_phi": 0.0,
+                "phi_extract_time_K_phi_u": 0.0,
+                "phi_convert_time_K_phi_u": 0.0,
+                "phi_extract_time_K_phi_phi": 0.0,
+                "phi_convert_time_K_phi_phi": 0.0,
+                "phi_form_call_count_R_phi": 0,
+                "phi_form_call_count_K_phi_u": 0,
+                "phi_form_call_count_K_phi_phi": 0,
+                "phi_matrix_extract_call_count_K_phi_u": 0,
+                "phi_matrix_convert_call_count_K_phi_u": 0,
+                "phi_matrix_extract_call_count_K_phi_phi": 0,
+                "phi_matrix_convert_call_count_K_phi_phi": 0,
+                "phi_scatter_pattern_build_time": 0.0,
+                "phi_scatter_pattern_build_count": 0,
+            }
+        )
+    return profile
 
 
 def _merge_profile(target, updates):
@@ -199,11 +229,18 @@ def _get_or_create_phi_cache(state, profile=None):
         ndof_u = state["u"].vector.getLocalSize()
         cache = {
             **form_cache,
+            "R_phi_cpp_form": getattr(R_phi_form, "_cpp_object", R_phi_form),
+            "K_phi_u_cpp_form": getattr(K_phi_u_form, "_cpp_object", K_phi_u_form),
+            "K_phi_phi_cpp_form": getattr(K_phi_phi_form, "_cpp_object", K_phi_phi_form),
             "R_phi_vec": R_phi_vec,
             "K_phi_u_mat": K_phi_u_mat,
             "K_phi_phi_mat": K_phi_phi_mat,
             "J_phiu_dense": np.zeros((ndof_phi, ndof_u), dtype=np.float64),
             "J_phiphi_dense": np.zeros((ndof_phi, ndof_phi), dtype=np.float64),
+            "J_phiu_scatter_rows": None,
+            "J_phiu_scatter_cols": None,
+            "J_phiphi_scatter_rows": None,
+            "J_phiphi_scatter_cols": None,
         }
         state["_monolithic_phi_cache"] = cache
         if profile is not None:
@@ -248,25 +285,89 @@ def _assemble_vector_array_compiled_reuse(vec, compiled_form):
     return vec.array.copy()
 
 
-def _dense_from_csr(mat, *, dense_buffer):
+def _dense_from_csr(
+    mat,
+    *,
+    dense_buffer,
+    scatter_rows=None,
+    scatter_cols=None,
+    track_scatter_build=False,
+):
     extract_t0 = time.perf_counter()
     indptr, indices, values = mat.getValuesCSR()
     extract_time = time.perf_counter() - extract_t0
     convert_t0 = time.perf_counter()
+    scatter_build_time = 0.0
+    scatter_build_count = 0
     dense_buffer.fill(0.0)
-    for row in range(len(indptr) - 1):
-        row_start = indptr[row]
-        row_end = indptr[row + 1]
-        dense_buffer[row, indices[row_start:row_end]] = values[row_start:row_end]
+    if scatter_rows is None or scatter_cols is None:
+        scatter_build_t0 = time.perf_counter()
+        row_sizes = np.diff(indptr)
+        scatter_rows = np.repeat(
+            np.arange(len(indptr) - 1, dtype=np.int32),
+            row_sizes,
+        )
+        scatter_cols = np.asarray(indices, dtype=np.int32)
+        if track_scatter_build:
+            scatter_build_time = time.perf_counter() - scatter_build_t0
+            scatter_build_count = 1
+    dense_buffer[scatter_rows, scatter_cols] = values
     convert_time = time.perf_counter() - convert_t0
-    return dense_buffer, float(extract_time), float(convert_time)
+    return (
+        dense_buffer,
+        float(extract_time),
+        float(convert_time),
+        scatter_rows,
+        scatter_cols,
+        float(scatter_build_time),
+        int(scatter_build_count),
+    )
 
 
-def _assemble_matrix_dense_compiled_reuse(mat, compiled_form, *, dense_buffer):
+def _assemble_matrix_dense_compiled_reuse(
+    mat,
+    compiled_form,
+    *,
+    dense_buffer,
+    scatter_rows=None,
+    scatter_cols=None,
+    track_scatter_build=False,
+    assembly_backend="python",
+):
     mat.zeroEntries()
-    fem.assemble_matrix(mat, compiled_form)
+    if assembly_backend == "python":
+        fem.assemble_matrix(mat, compiled_form)
+    elif assembly_backend == "cpp_petsc":
+        cpp.fem.assemble_matrix_petsc(mat, getattr(compiled_form, "_cpp_object", compiled_form), [])
+    else:
+        raise ValueError(f"Unsupported phi_matrix_assembly_backend: {assembly_backend}")
     mat.assemble()
-    return _dense_from_csr(mat, dense_buffer=dense_buffer)
+    return _dense_from_csr(
+        mat,
+        dense_buffer=dense_buffer,
+        scatter_rows=scatter_rows,
+        scatter_cols=scatter_cols,
+        track_scatter_build=track_scatter_build,
+    )
+
+
+def _prime_phi_cache(state):
+    if state.get("_monolithic_phi_cache_primed", False):
+        return 0.0
+    t0 = time.perf_counter()
+    _get_or_create_phi_cache(state, profile=None)
+    state["_monolithic_phi_cache_primed"] = True
+    return float(time.perf_counter() - t0)
+
+
+def _capture_phi_profile_detail(phi_profile, key, value):
+    if key in phi_profile:
+        phi_profile[key] += value
+
+
+def _capture_phi_profile_count(phi_profile, key, value=1):
+    if key in phi_profile:
+        phi_profile[key] += int(value)
 
 
 def _snapshot_state_fields(state):
@@ -1051,6 +1152,9 @@ def assemble_monolithic_contact_system(
     reuse_matrix_pattern=False,
     reuse_fieldsplit_is=False,
     profile_assembly_detail=False,
+    phi_scatter_reuse=True,
+    profile_phi_detail=True,
+    phi_matrix_assembly_backend="python",
 ):
     """Assemble the monolithic block residual and Jacobian."""
     dof_layout = _state_dof_layout(state)
@@ -1083,59 +1187,42 @@ def assemble_monolithic_contact_system(
     )
     contact_block_assembly_time = time.perf_counter() - contact_t0
 
-    phi_t0 = time.perf_counter()
     R_u_total = R_u_struct - contact["R_u_c"]
-    phi_profile = _phi_profile_template()
-    phi_cache = _get_or_create_phi_cache(state, profile=phi_profile) if build_path == "optimized" else None
+    phi_profile = _phi_profile_template(profile_phi_detail=profile_phi_detail)
+    phi_cache = None
+    phi_form_cache_hits = 0
+    phi_form_cache_misses = 0
+    if build_path == "optimized":
+        phi_cache = _get_or_create_phi_cache(state, profile=None)
+        if state.get("_monolithic_phi_cache") is phi_cache:
+            phi_form_cache_hits = 3 if state.get("_monolithic_phi_cache_primed", False) else 0
+            phi_form_cache_misses = 0 if phi_form_cache_hits else 3
+    phi_t0 = time.perf_counter()
     compiled_R_phi = state["R_phi_form"] if phi_cache is None else phi_cache["R_phi_form"]
     rhs_assemble_t0 = time.perf_counter()
     if phi_cache is None:
         compiled_R_phi = _compile_form(compiled_R_phi)
-        phi_profile["phi_form_cache_miss_count"] += 1
         phi_vec = fem.assemble_vector(compiled_R_phi)
-        phi_profile["phi_rhs_assembly_time"] += time.perf_counter() - rhs_assemble_t0
+        rhs_assembly_time = time.perf_counter() - rhs_assemble_t0
         rhs_extract_t0 = time.perf_counter()
         phi_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         R_phi_total = phi_vec.array.copy()
-        phi_profile["phi_rhs_extract_time"] += time.perf_counter() - rhs_extract_t0
+        rhs_extract_time = time.perf_counter() - rhs_extract_t0
+        phi_form_cache_misses += 1
     else:
-        phi_profile["reused_phi_rhs_vec"] = True
         R_phi_total = _assemble_vector_array_compiled_reuse(phi_cache["R_phi_vec"], compiled_R_phi)
-        phi_profile["phi_rhs_assembly_time"] += time.perf_counter() - rhs_assemble_t0
+        rhs_assembly_time = time.perf_counter() - rhs_assemble_t0
         rhs_extract_t0 = time.perf_counter()
         R_phi_total = np.asarray(R_phi_total, dtype=np.float64)
-        phi_profile["phi_rhs_extract_time"] += time.perf_counter() - rhs_extract_t0
-    phi_profile["phi_form_call_count"] += 1
-    phi_profile["phi_rhs_extract_call_count"] += 1
-    phi_profile["phi_residual_call_count"] += 1
-    phi_profile["phi_residual_form_assembly_time"] += phi_profile["phi_rhs_assembly_time"]
-    phi_profile["phi_residual_extract_time"] += phi_profile["phi_rhs_extract_time"]
-    phi_profile["phi_form_assembly_time"] += phi_profile["phi_rhs_assembly_time"]
-    phi_profile["phi_rhs_extract_or_convert_time"] += phi_profile["phi_rhs_extract_time"]
+        rhs_extract_time = time.perf_counter() - rhs_extract_t0
     phi_block_assembly_time = time.perf_counter() - phi_t0
 
     out = {
-        "backend": backend,
-        "build_path": build_path,
         "R_u_total": R_u_total,
         "R_phi_total": R_phi_total,
-        "R_u_struct": R_u_struct,
-        "R_u_contact": contact["R_u_c"],
-        "J_uu_struct": J_uu_struct,
-        "solid_meta": solid_meta,
-        "diagnostics": contact["diagnostics"],
-        "point_data": contact["point_data"],
-        "contact_profiling": contact.get("profiling", {}),
         "u_constrained_dofs": _owned_bc_dofs(state["solid_bcs"]),
         "phi_constrained_dofs": _owned_bc_dofs(state["phi_bcs"]),
-        "struct_block_assembly_time": float(struct_block_assembly_time),
-        "contact_block_assembly_time": float(contact_block_assembly_time),
-        "phi_block_assembly_time": float(phi_block_assembly_time),
-        **dof_layout,
     }
-    for key, value in contact.get("profiling", {}).items():
-        out[key] = value
-    assembly_time = struct_block_assembly_time + contact_block_assembly_time + phi_block_assembly_time
 
     if need_jacobian:
         block_build_t0 = time.perf_counter()
@@ -1143,10 +1230,13 @@ def assemble_monolithic_contact_system(
         out["J_uphi"] = -contact["K_uphi_c"]
         compiled_K_phi_u = state["K_phi_u_form"] if phi_cache is None else phi_cache["K_phi_u_form"]
         compiled_K_phi_phi = state["K_phi_phi_form"] if phi_cache is None else phi_cache["K_phi_phi_form"]
+        phiu_scatter_build_time = 0.0
+        phiu_scatter_build_count = 0
+        phiphi_scatter_build_time = 0.0
+        phiphi_scatter_build_count = 0
         if phi_cache is None:
             compiled_K_phi_u = _compile_form(compiled_K_phi_u)
             compiled_K_phi_phi = _compile_form(compiled_K_phi_phi)
-            phi_profile["phi_form_cache_miss_count"] += 2
 
             phiu_form_t0 = time.perf_counter()
             phiu_mat = fem.assemble_matrix(compiled_K_phi_u)
@@ -1165,44 +1255,52 @@ def assemble_monolithic_contact_system(
             out["J_phiphi"] = dense_array_from_petsc_mat(phiphi_mat)
             phiphi_extract_time = time.perf_counter() - phiphi_extract_t0
             phiphi_convert_time = 0.0
+            phi_form_cache_misses += 2
         else:
-            phi_profile["reused_phi_kphiu_mat"] = True
-            phi_profile["reused_phi_kphiphi_mat"] = True
-            phi_profile["reused_phi_dense_buffers"] = True
-
             phiu_form_t0 = time.perf_counter()
-            out["J_phiu"], phiu_extract_time, phiu_convert_time = _assemble_matrix_dense_compiled_reuse(
+            (
+                out["J_phiu"],
+                phiu_extract_time,
+                phiu_convert_time,
+                phi_cache["J_phiu_scatter_rows"],
+                phi_cache["J_phiu_scatter_cols"],
+                phiu_scatter_build_time,
+                phiu_scatter_build_count,
+            ) = _assemble_matrix_dense_compiled_reuse(
                 phi_cache["K_phi_u_mat"],
                 compiled_K_phi_u,
                 dense_buffer=phi_cache["J_phiu_dense"],
+                scatter_rows=phi_cache.get("J_phiu_scatter_rows") if phi_scatter_reuse else None,
+                scatter_cols=phi_cache.get("J_phiu_scatter_cols") if phi_scatter_reuse else None,
+                track_scatter_build=profile_phi_detail,
+                assembly_backend=phi_matrix_assembly_backend,
             )
             phiu_form_time = time.perf_counter() - phiu_form_t0 - phiu_extract_time - phiu_convert_time
 
             phiphi_form_t0 = time.perf_counter()
-            out["J_phiphi"], phiphi_extract_time, phiphi_convert_time = _assemble_matrix_dense_compiled_reuse(
+            (
+                out["J_phiphi"],
+                phiphi_extract_time,
+                phiphi_convert_time,
+                phi_cache["J_phiphi_scatter_rows"],
+                phi_cache["J_phiphi_scatter_cols"],
+                phiphi_scatter_build_time,
+                phiphi_scatter_build_count,
+            ) = _assemble_matrix_dense_compiled_reuse(
                 phi_cache["K_phi_phi_mat"],
                 compiled_K_phi_phi,
                 dense_buffer=phi_cache["J_phiphi_dense"],
+                scatter_rows=phi_cache.get("J_phiphi_scatter_rows") if phi_scatter_reuse else None,
+                scatter_cols=phi_cache.get("J_phiphi_scatter_cols") if phi_scatter_reuse else None,
+                track_scatter_build=profile_phi_detail,
+                assembly_backend=phi_matrix_assembly_backend,
             )
             phiphi_form_time = time.perf_counter() - phiphi_form_t0 - phiphi_extract_time - phiphi_convert_time
-
-        phi_profile["phi_form_call_count"] += 2
-        phi_profile["phi_matrix_extract_call_count"] += 2
-        phi_profile["phi_matrix_convert_call_count"] += 2
-        phi_profile["phi_kphiu_call_count"] += 1
-        phi_profile["phi_kphiphi_call_count"] += 1
-        phi_profile["phi_kphiu_form_assembly_time"] += float(phiu_form_time)
-        phi_profile["phi_kphiu_extract_time"] += float(phiu_extract_time)
-        phi_profile["phi_kphiu_convert_time"] += float(phiu_convert_time)
-        phi_profile["phi_kphiphi_form_assembly_time"] += float(phiphi_form_time)
-        phi_profile["phi_kphiphi_extract_time"] += float(phiphi_extract_time)
-        phi_profile["phi_kphiphi_convert_time"] += float(phiphi_convert_time)
-        phi_profile["phi_form_assembly_time"] += float(phiu_form_time + phiphi_form_time)
-        phi_profile["phi_matrix_extract_time"] += float(phiu_extract_time + phiphi_extract_time)
-        phi_profile["phi_matrix_convert_time"] += float(phiu_convert_time + phiphi_convert_time)
-        phi_profile["phi_matrix_extract_or_convert_time"] += float(
-            phiu_extract_time + phiphi_extract_time + phiu_convert_time + phiphi_convert_time
-        )
+            if not phi_scatter_reuse:
+                phi_cache["J_phiu_scatter_rows"] = None
+                phi_cache["J_phiu_scatter_cols"] = None
+                phi_cache["J_phiphi_scatter_rows"] = None
+                phi_cache["J_phiphi_scatter_cols"] = None
 
         out["phi_block_assembly_time"] = float(time.perf_counter() - phi_t0)
         out["nnz_Juu"] = _nnz_dense(out["J_uu"])
@@ -1253,6 +1351,90 @@ def assemble_monolithic_contact_system(
         out["reused_fieldsplit_is"] = False
         out["reuse_context"] = None
         block_build_time = 0.0
+
+    out.update(
+        {
+            "backend": backend,
+            "build_path": build_path,
+            "R_u_total": R_u_total,
+            "R_phi_total": R_phi_total,
+            "R_u_struct": R_u_struct,
+            "R_u_contact": contact["R_u_c"],
+            "J_uu_struct": J_uu_struct,
+            "solid_meta": solid_meta,
+            "diagnostics": contact["diagnostics"],
+            "point_data": contact["point_data"],
+            "contact_profiling": contact.get("profiling", {}),
+            "u_constrained_dofs": _owned_bc_dofs(state["solid_bcs"]),
+            "phi_constrained_dofs": _owned_bc_dofs(state["phi_bcs"]),
+            "struct_block_assembly_time": float(struct_block_assembly_time),
+            "contact_block_assembly_time": float(contact_block_assembly_time),
+            "phi_block_assembly_time": float(out.get("phi_block_assembly_time", phi_block_assembly_time)),
+            **dof_layout,
+        }
+    )
+    for key, value in contact.get("profiling", {}).items():
+        out[key] = value
+
+    phi_profile["phi_form_cache_hit_count"] += int(phi_form_cache_hits)
+    phi_profile["phi_form_cache_miss_count"] += int(phi_form_cache_misses)
+    phi_profile["reused_phi_rhs_vec"] = bool(phi_cache is not None)
+    phi_profile["phi_rhs_assembly_time"] += float(rhs_assembly_time)
+    phi_profile["phi_rhs_extract_time"] += float(rhs_extract_time)
+    phi_profile["phi_form_call_count"] += 1
+    phi_profile["phi_rhs_extract_call_count"] += 1
+    phi_profile["phi_residual_call_count"] += 1
+    phi_profile["phi_residual_form_assembly_time"] += float(rhs_assembly_time)
+    phi_profile["phi_residual_extract_time"] += float(rhs_extract_time)
+    phi_profile["phi_form_assembly_time"] += float(rhs_assembly_time)
+    phi_profile["phi_rhs_extract_or_convert_time"] += float(rhs_extract_time)
+    if profile_phi_detail:
+        _capture_phi_profile_detail(phi_profile, "phi_form_time_R_phi", float(rhs_assembly_time))
+        _capture_phi_profile_count(phi_profile, "phi_form_call_count_R_phi", 1)
+    if need_jacobian:
+        phi_profile["reused_phi_kphiu_mat"] = bool(phi_cache is not None)
+        phi_profile["reused_phi_kphiphi_mat"] = bool(phi_cache is not None)
+        phi_profile["reused_phi_dense_buffers"] = bool(phi_cache is not None)
+        phi_profile["phi_form_call_count"] += 2
+        phi_profile["phi_matrix_extract_call_count"] += 2
+        phi_profile["phi_matrix_convert_call_count"] += 2
+        phi_profile["phi_kphiu_call_count"] += 1
+        phi_profile["phi_kphiphi_call_count"] += 1
+        phi_profile["phi_kphiu_form_assembly_time"] += float(phiu_form_time)
+        phi_profile["phi_kphiu_extract_time"] += float(phiu_extract_time)
+        phi_profile["phi_kphiu_convert_time"] += float(phiu_convert_time)
+        phi_profile["phi_kphiphi_form_assembly_time"] += float(phiphi_form_time)
+        phi_profile["phi_kphiphi_extract_time"] += float(phiphi_extract_time)
+        phi_profile["phi_kphiphi_convert_time"] += float(phiphi_convert_time)
+        if profile_phi_detail:
+            _capture_phi_profile_detail(phi_profile, "phi_form_time_K_phi_u", float(phiu_form_time))
+            _capture_phi_profile_detail(phi_profile, "phi_form_time_K_phi_phi", float(phiphi_form_time))
+            _capture_phi_profile_detail(phi_profile, "phi_extract_time_K_phi_u", float(phiu_extract_time))
+            _capture_phi_profile_detail(phi_profile, "phi_convert_time_K_phi_u", float(phiu_convert_time))
+            _capture_phi_profile_detail(phi_profile, "phi_extract_time_K_phi_phi", float(phiphi_extract_time))
+            _capture_phi_profile_detail(phi_profile, "phi_convert_time_K_phi_phi", float(phiphi_convert_time))
+            _capture_phi_profile_count(phi_profile, "phi_form_call_count_K_phi_u", 1)
+            _capture_phi_profile_count(phi_profile, "phi_form_call_count_K_phi_phi", 1)
+            _capture_phi_profile_count(phi_profile, "phi_matrix_extract_call_count_K_phi_u", 1)
+            _capture_phi_profile_count(phi_profile, "phi_matrix_convert_call_count_K_phi_u", 1)
+            _capture_phi_profile_count(phi_profile, "phi_matrix_extract_call_count_K_phi_phi", 1)
+            _capture_phi_profile_count(phi_profile, "phi_matrix_convert_call_count_K_phi_phi", 1)
+            _capture_phi_profile_detail(
+                phi_profile,
+                "phi_scatter_pattern_build_time",
+                float(phiu_scatter_build_time + phiphi_scatter_build_time),
+            )
+            _capture_phi_profile_count(
+                phi_profile,
+                "phi_scatter_pattern_build_count",
+                int(phiu_scatter_build_count + phiphi_scatter_build_count),
+            )
+        phi_profile["phi_form_assembly_time"] += float(phiu_form_time + phiphi_form_time)
+        phi_profile["phi_matrix_extract_time"] += float(phiu_extract_time + phiphi_extract_time)
+        phi_profile["phi_matrix_convert_time"] += float(phiu_convert_time + phiphi_convert_time)
+        phi_profile["phi_matrix_extract_or_convert_time"] += float(
+            phiu_extract_time + phiphi_extract_time + phiu_convert_time + phiphi_convert_time
+        )
 
     _merge_profile(out, phi_profile)
     assembly_time = (
@@ -1349,6 +1531,9 @@ def solve_monolithic_contact(
     max_backtracks=8,
     backtrack_factor=0.5,
     profile_assembly_detail=False,
+    phi_scatter_reuse=True,
+    profile_phi_detail=True,
+    phi_matrix_assembly_backend="python",
     verbose=True,
 ):
     """Solve one fixed-load monolithic contact state."""
@@ -1372,6 +1557,9 @@ def solve_monolithic_contact(
             reuse_matrix_pattern=reuse_matrix_pattern,
             reuse_fieldsplit_is=reuse_fieldsplit_is,
             profile_assembly_detail=profile_assembly_detail,
+            phi_scatter_reuse=phi_scatter_reuse,
+            profile_phi_detail=profile_phi_detail,
+            phi_matrix_assembly_backend=phi_matrix_assembly_backend,
         )
         residual = assembled["global_residual_array"]
         residual_norm = float(np.linalg.norm(residual))
@@ -1489,6 +1677,33 @@ def solve_monolithic_contact(
                 **dof_layout,
                 "history": history,
             }
+            if profile_phi_detail:
+                info.update(
+                    {
+                        "phi_form_time_R_phi": float(assembled.get("phi_form_time_R_phi", 0.0)),
+                        "phi_form_time_K_phi_u": float(assembled.get("phi_form_time_K_phi_u", 0.0)),
+                        "phi_form_time_K_phi_phi": float(assembled.get("phi_form_time_K_phi_phi", 0.0)),
+                        "phi_extract_time_K_phi_u": float(assembled.get("phi_extract_time_K_phi_u", 0.0)),
+                        "phi_convert_time_K_phi_u": float(assembled.get("phi_convert_time_K_phi_u", 0.0)),
+                        "phi_extract_time_K_phi_phi": float(assembled.get("phi_extract_time_K_phi_phi", 0.0)),
+                        "phi_convert_time_K_phi_phi": float(assembled.get("phi_convert_time_K_phi_phi", 0.0)),
+                        "phi_form_call_count_R_phi": int(assembled.get("phi_form_call_count_R_phi", 0)),
+                        "phi_form_call_count_K_phi_u": int(assembled.get("phi_form_call_count_K_phi_u", 0)),
+                        "phi_form_call_count_K_phi_phi": int(assembled.get("phi_form_call_count_K_phi_phi", 0)),
+                        "phi_matrix_extract_call_count_K_phi_u": int(
+                            assembled.get("phi_matrix_extract_call_count_K_phi_u", 0)
+                        ),
+                        "phi_matrix_convert_call_count_K_phi_u": int(
+                            assembled.get("phi_matrix_convert_call_count_K_phi_u", 0)
+                        ),
+                        "phi_matrix_extract_call_count_K_phi_phi": int(
+                            assembled.get("phi_matrix_extract_call_count_K_phi_phi", 0)
+                        ),
+                        "phi_matrix_convert_call_count_K_phi_phi": int(
+                            assembled.get("phi_matrix_convert_call_count_K_phi_phi", 0)
+                        ),
+                    }
+                )
             return state, info
 
         try:
@@ -1700,6 +1915,33 @@ def solve_monolithic_contact(
             "linear_iterations": linear_info["linear_iterations"],
             "ksp_reason": linear_info["ksp_reason"],
         }
+        if profile_phi_detail:
+            row.update(
+                {
+                    "phi_form_time_R_phi": float(assembled.get("phi_form_time_R_phi", 0.0)),
+                    "phi_form_time_K_phi_u": float(assembled.get("phi_form_time_K_phi_u", 0.0)),
+                    "phi_form_time_K_phi_phi": float(assembled.get("phi_form_time_K_phi_phi", 0.0)),
+                    "phi_extract_time_K_phi_u": float(assembled.get("phi_extract_time_K_phi_u", 0.0)),
+                    "phi_convert_time_K_phi_u": float(assembled.get("phi_convert_time_K_phi_u", 0.0)),
+                    "phi_extract_time_K_phi_phi": float(assembled.get("phi_extract_time_K_phi_phi", 0.0)),
+                    "phi_convert_time_K_phi_phi": float(assembled.get("phi_convert_time_K_phi_phi", 0.0)),
+                    "phi_form_call_count_R_phi": int(assembled.get("phi_form_call_count_R_phi", 0)),
+                    "phi_form_call_count_K_phi_u": int(assembled.get("phi_form_call_count_K_phi_u", 0)),
+                    "phi_form_call_count_K_phi_phi": int(assembled.get("phi_form_call_count_K_phi_phi", 0)),
+                    "phi_matrix_extract_call_count_K_phi_u": int(
+                        assembled.get("phi_matrix_extract_call_count_K_phi_u", 0)
+                    ),
+                    "phi_matrix_convert_call_count_K_phi_u": int(
+                        assembled.get("phi_matrix_convert_call_count_K_phi_u", 0)
+                    ),
+                    "phi_matrix_extract_call_count_K_phi_phi": int(
+                        assembled.get("phi_matrix_extract_call_count_K_phi_phi", 0)
+                    ),
+                    "phi_matrix_convert_call_count_K_phi_phi": int(
+                        assembled.get("phi_matrix_convert_call_count_K_phi_phi", 0)
+                    ),
+                }
+            )
         history.append(row)
 
         if verbose and rank0:
@@ -1748,6 +1990,18 @@ def solve_monolithic_contact(
                 **dof_layout,
                 "history": history,
             }
+            if profile_phi_detail:
+                info.update(
+                    {
+                        "phi_form_time_R_phi": row.get("phi_form_time_R_phi", 0.0),
+                        "phi_form_time_K_phi_u": row.get("phi_form_time_K_phi_u", 0.0),
+                        "phi_form_time_K_phi_phi": row.get("phi_form_time_K_phi_phi", 0.0),
+                        "phi_extract_time_K_phi_u": row.get("phi_extract_time_K_phi_u", 0.0),
+                        "phi_convert_time_K_phi_u": row.get("phi_convert_time_K_phi_u", 0.0),
+                        "phi_extract_time_K_phi_phi": row.get("phi_extract_time_K_phi_phi", 0.0),
+                        "phi_convert_time_K_phi_phi": row.get("phi_convert_time_K_phi_phi", 0.0),
+                    }
+                )
             return state, info
 
     if not failure_reason:
@@ -1876,6 +2130,10 @@ def solve_monolithic_contact_loadpath(
     max_walltime_seconds=None,
     stop_after_first_nonzero_accepted_step=False,
     profile_assembly_detail=False,
+    phi_cache_prime=True,
+    phi_scatter_reuse=True,
+    profile_phi_detail=True,
+    phi_matrix_assembly_backend="python",
 ):
     """Advance a load path with the monolithic Newton step."""
     rank0 = state0["domain"].mpi_comm().rank == 0
@@ -1907,6 +2165,10 @@ def solve_monolithic_contact_loadpath(
     termination_category = "completed_full_run"
     start_walltime = time.perf_counter()
     total_newton_steps_used = 0
+    phi_cache_prime_time = 0.0
+
+    if build_path == "optimized" and phi_cache_prime:
+        phi_cache_prime_time = _prime_phi_cache(state0)
 
     while index < len(steps):
         elapsed_before_attempt = time.perf_counter() - start_walltime
@@ -1955,6 +2217,9 @@ def solve_monolithic_contact_loadpath(
             max_backtracks=max_backtracks,
             backtrack_factor=backtrack_factor,
             profile_assembly_detail=profile_assembly_detail,
+            phi_scatter_reuse=phi_scatter_reuse,
+            profile_phi_detail=profile_phi_detail,
+            phi_matrix_assembly_backend=phi_matrix_assembly_backend,
             verbose=verbose,
         )
 
@@ -2044,6 +2309,28 @@ def solve_monolithic_contact_loadpath(
             "phi_kphiphi_form_assembly_time": float(step_info.get("phi_kphiphi_form_assembly_time", 0.0)),
             "phi_kphiphi_extract_time": float(step_info.get("phi_kphiphi_extract_time", 0.0)),
             "phi_kphiphi_convert_time": float(step_info.get("phi_kphiphi_convert_time", 0.0)),
+            "phi_form_time_R_phi": float(step_info.get("phi_form_time_R_phi", 0.0)),
+            "phi_form_time_K_phi_u": float(step_info.get("phi_form_time_K_phi_u", 0.0)),
+            "phi_form_time_K_phi_phi": float(step_info.get("phi_form_time_K_phi_phi", 0.0)),
+            "phi_extract_time_K_phi_u": float(step_info.get("phi_extract_time_K_phi_u", 0.0)),
+            "phi_convert_time_K_phi_u": float(step_info.get("phi_convert_time_K_phi_u", 0.0)),
+            "phi_extract_time_K_phi_phi": float(step_info.get("phi_extract_time_K_phi_phi", 0.0)),
+            "phi_convert_time_K_phi_phi": float(step_info.get("phi_convert_time_K_phi_phi", 0.0)),
+            "phi_form_call_count_R_phi": int(step_info.get("phi_form_call_count_R_phi", 0)),
+            "phi_form_call_count_K_phi_u": int(step_info.get("phi_form_call_count_K_phi_u", 0)),
+            "phi_form_call_count_K_phi_phi": int(step_info.get("phi_form_call_count_K_phi_phi", 0)),
+            "phi_matrix_extract_call_count_K_phi_u": int(
+                step_info.get("phi_matrix_extract_call_count_K_phi_u", 0)
+            ),
+            "phi_matrix_convert_call_count_K_phi_u": int(
+                step_info.get("phi_matrix_convert_call_count_K_phi_u", 0)
+            ),
+            "phi_matrix_extract_call_count_K_phi_phi": int(
+                step_info.get("phi_matrix_extract_call_count_K_phi_phi", 0)
+            ),
+            "phi_matrix_convert_call_count_K_phi_phi": int(
+                step_info.get("phi_matrix_convert_call_count_K_phi_phi", 0)
+            ),
             "dofmap_lookup_time": float(step_info.get("dofmap_lookup_time", 0.0)),
             "surface_entity_iteration_time": float(step_info.get("surface_entity_iteration_time", 0.0)),
             "basis_eval_or_tabulation_time": float(step_info.get("basis_eval_or_tabulation_time", 0.0)),
@@ -2330,6 +2617,62 @@ def solve_monolithic_contact_loadpath(
                 float(item.get("phi_kphiphi_convert_time", 0.0))
                 for item in step_info.get("history", [])
             ],
+            "phi_form_time_R_phi_list": [
+                float(item.get("phi_form_time_R_phi", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_time_K_phi_u_list": [
+                float(item.get("phi_form_time_K_phi_u", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_time_K_phi_phi_list": [
+                float(item.get("phi_form_time_K_phi_phi", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_extract_time_K_phi_u_list": [
+                float(item.get("phi_extract_time_K_phi_u", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_convert_time_K_phi_u_list": [
+                float(item.get("phi_convert_time_K_phi_u", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_extract_time_K_phi_phi_list": [
+                float(item.get("phi_extract_time_K_phi_phi", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_convert_time_K_phi_phi_list": [
+                float(item.get("phi_convert_time_K_phi_phi", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_call_count_R_phi_list": [
+                int(item.get("phi_form_call_count_R_phi", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_call_count_K_phi_u_list": [
+                int(item.get("phi_form_call_count_K_phi_u", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_form_call_count_K_phi_phi_list": [
+                int(item.get("phi_form_call_count_K_phi_phi", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_extract_call_count_K_phi_u_list": [
+                int(item.get("phi_matrix_extract_call_count_K_phi_u", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_convert_call_count_K_phi_u_list": [
+                int(item.get("phi_matrix_convert_call_count_K_phi_u", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_extract_call_count_K_phi_phi_list": [
+                int(item.get("phi_matrix_extract_call_count_K_phi_phi", 0))
+                for item in step_info.get("history", [])
+            ],
+            "phi_matrix_convert_call_count_K_phi_phi_list": [
+                int(item.get("phi_matrix_convert_call_count_K_phi_phi", 0))
+                for item in step_info.get("history", [])
+            ],
             "dofmap_lookup_time_list": [
                 float(item.get("dofmap_lookup_time", 0.0))
                 for item in step_info.get("history", [])
@@ -2480,6 +2823,7 @@ def solve_monolithic_contact_loadpath(
     result["termination_category"] = termination_category
     result["total_newton_steps_used"] = int(total_newton_steps_used)
     result["total_walltime"] = float(time.perf_counter() - start_walltime)
+    result["phi_cache_prime_time"] = float(phi_cache_prime_time)
     for item in attempt_history:
         item["terminated_early"] = result["terminated_early"]
         item["termination_reason"] = result["termination_reason"]
