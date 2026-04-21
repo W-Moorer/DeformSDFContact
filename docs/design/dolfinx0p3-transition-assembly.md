@@ -86,15 +86,17 @@ It does **not** perform:
 Instead, it maps each boundary facet to one midpoint quadrature point and
 builds contact point-kernel data directly:
 
-- `g_n` from midpoint interpolation of local `phi` minus a configurable offset
+- `g_n` from a transition midpoint closure model
+  `gap_offset - G_u u_local - N_phi phi_local`
 - `G_a` from midpoint P1 shape values
 - `G_u` from midpoint shape values projected onto the outward facet normal
 - `H_uu_g = 0`
 - `H_uphi_g = 0`
 
 This is enough to validate block placement and local-to-global insertion of the
-existing contact local chain. It is a transition adapter only, not the final
-contact geometry backend.
+existing contact local chain while staying consistent with the current local
+kernel sign convention. It is a transition adapter only, not the final contact
+geometry backend.
 
 ## What This Adapter Validates
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 from petsc4py import PETSc
 
 from ...assembly import (
@@ -12,6 +13,8 @@ from ...assembly import (
     MonolithicBlockLayout,
     SDFLocalContribution,
     SolidLocalContribution,
+    StructuralNodalLoad,
+    accumulate_structural_nodal_loads,
 )
 from ...contact import ContactLaw
 from ...materials import IsotropicElasticParameters
@@ -24,6 +27,9 @@ from .common import (
     function_space_dimension,
 )
 from .contact_adapter import assemble_contact_local_contributions
+from .contact_pairing_backend import assemble_contact_pairing_local_contributions
+from .contact_query_backend import assemble_contact_query_local_contributions
+from .contact_summary import ContactAssemblySummary
 from .sdf_adapter import assemble_sdf_local_contributions
 from .solid_adapter import assemble_solid_local_contributions
 
@@ -44,6 +50,7 @@ class Dolfinx0p3MonolithicDryRunResult:
     solid_contributions: tuple[SolidLocalContribution, ...]
     sdf_contributions: tuple[SDFLocalContribution, ...]
     contact_contributions: tuple[ContactLocalContribution, ...]
+    contact_summary: ContactAssemblySummary
 
 
 def _assemble_solid_block_pair(
@@ -95,6 +102,74 @@ def _assemble_sdf_block_pair(
     add_values_to_matrix(K, phi_rows, phi_rows, contribution.K_phiphi)
 
 
+def _apply_structural_external_loads(
+    layout: MonolithicBlockLayout,
+    residual_u: PETSc.Vec,
+    residual: PETSc.Vec,
+    external_loads: tuple[StructuralNodalLoad, ...],
+) -> None:
+    external_vector = accumulate_structural_nodal_loads(layout.ndof_u, external_loads)
+    if not np.any(external_vector):
+        return
+    structural_dofs = np.arange(layout.ndof_u, dtype=np.int32)
+    add_values_to_vector(residual_u, structural_dofs, -external_vector)
+    add_values_to_vector(residual, structural_dofs, -external_vector)
+
+
+def assemble_monolithic_from_local_contributions(
+    layout: MonolithicBlockLayout,
+    comm: object,
+    solid_contributions: tuple[SolidLocalContribution, ...],
+    sdf_contributions: tuple[SDFLocalContribution, ...],
+    contact_contributions: tuple[ContactLocalContribution, ...],
+    contact_summary: ContactAssemblySummary,
+    *,
+    external_loads: tuple[StructuralNodalLoad, ...] = (),
+    plan_note: str = "Transition adapter for the first assembled monolithic dry run.",
+) -> Dolfinx0p3MonolithicDryRunResult:
+    """Assemble PETSc residual and tangent blocks from validated local contributions."""
+
+    plan = AssemblyPlan(
+        layout=layout,
+        backend_name="dolfinx0p3",
+        note=plan_note,
+    )
+
+    R_u = create_petsc_vector(layout.ndof_u, comm)
+    R_phi = create_petsc_vector(layout.ndof_phi, comm)
+    R = create_petsc_vector(layout.total_dofs, comm)
+    K_uu = create_petsc_matrix(layout.ndof_u, layout.ndof_u, comm)
+    K_uphi = create_petsc_matrix(layout.ndof_u, layout.ndof_phi, comm)
+    K_phiu = create_petsc_matrix(layout.ndof_phi, layout.ndof_u, comm)
+    K_phiphi = create_petsc_matrix(layout.ndof_phi, layout.ndof_phi, comm)
+    K = create_petsc_matrix(layout.total_dofs, layout.total_dofs, comm)
+
+    for contribution in solid_contributions:
+        _assemble_solid_block_pair(contribution, R_u, R, K_uu, K)
+    for contribution in sdf_contributions:
+        _assemble_sdf_block_pair(contribution, layout, R_phi, R, K_phiu, K_phiphi, K)
+    for contribution in contact_contributions:
+        _assemble_contact_block_pair(contribution, layout, R_u, R, K_uu, K_uphi, K)
+    _apply_structural_external_loads(layout, R_u, R, tuple(external_loads))
+
+    assemble_petsc_objects(R_u, R_phi, R, K_uu, K_uphi, K_phiu, K_phiphi, K)
+    return Dolfinx0p3MonolithicDryRunResult(
+        plan=plan,
+        R_u=R_u,
+        R_phi=R_phi,
+        R=R,
+        K_uu=K_uu,
+        K_uphi=K_uphi,
+        K_phiu=K_phiu,
+        K_phiphi=K_phiphi,
+        K=K,
+        solid_contributions=solid_contributions,
+        sdf_contributions=sdf_contributions,
+        contact_contributions=contact_contributions,
+        contact_summary=contact_summary,
+    )
+
+
 def assemble_monolithic_dry_run(
     mesh: object,
     displacement_space: object,
@@ -105,8 +180,14 @@ def assemble_monolithic_dry_run(
     solid_params: IsotropicElasticParameters,
     contact_law: ContactLaw,
     reinitialize_beta: float = 0.0,
-    phi_target: float = 0.0,
+    phi_target: object = 0.0,
     contact_gap_offset: float = 0.0,
+    contact_backend: str = "transition",
+    contact_query_point_fraction: float = 0.35,
+    contact_query_point_normal_offset: float = 0.15,
+    contact_slave_boundary: str = "all",
+    contact_master_boundary: str = "all",
+    external_loads: tuple[StructuralNodalLoad, ...] = (),
 ) -> Dolfinx0p3MonolithicDryRunResult:
     """Assemble a monolithic PETSc residual and tangent without solving.
 
@@ -117,11 +198,6 @@ def assemble_monolithic_dry_run(
     layout = MonolithicBlockLayout(
         ndof_u=function_space_dimension(displacement_space),
         ndof_phi=function_space_dimension(phi_space),
-    )
-    plan = AssemblyPlan(
-        layout=layout,
-        backend_name="dolfinx0p3",
-        note="Transition adapter for the first assembled monolithic dry run.",
     )
 
     solid_contributions = assemble_solid_local_contributions(
@@ -140,46 +216,65 @@ def assemble_monolithic_dry_run(
         beta=reinitialize_beta,
         phi_target=phi_target,
     )
-    contact_contributions = assemble_contact_local_contributions(
-        mesh,
-        displacement_space,
-        phi_space,
-        phi_function,
-        contact_law,
-        gap_offset=contact_gap_offset,
+    if contact_backend == "transition":
+        contact_result = assemble_contact_local_contributions(
+            mesh,
+            displacement_space,
+            phi_space,
+            displacement_function,
+            phi_function,
+            contact_law,
+            gap_offset=contact_gap_offset,
+            slave_boundary=contact_slave_boundary,
+        )
+    elif contact_backend == "query_point":
+        contact_result = assemble_contact_query_local_contributions(
+            mesh,
+            displacement_space,
+            phi_space,
+            displacement_function,
+            phi_function,
+            contact_law,
+            gap_offset=contact_gap_offset,
+            query_point_fraction=contact_query_point_fraction,
+            query_point_normal_offset=contact_query_point_normal_offset,
+            slave_boundary=contact_slave_boundary,
+        )
+    elif contact_backend == "pairing":
+        contact_result = assemble_contact_pairing_local_contributions(
+            mesh,
+            displacement_space,
+            phi_space,
+            displacement_function,
+            phi_function,
+            contact_law,
+            gap_offset=contact_gap_offset,
+            slave_boundary=contact_slave_boundary,
+            master_boundary=contact_master_boundary,
+        )
+    else:
+        raise ValueError(
+            "contact_backend must be one of {'transition', 'query_point', 'pairing'}, "
+            f"got {contact_backend!r}"
+        )
+
+    return assemble_monolithic_from_local_contributions(
+        layout,
+        comm,
+        solid_contributions,
+        sdf_contributions,
+        contact_result.contributions,
+        contact_result.summary,
+        external_loads=tuple(external_loads),
+        plan_note=(
+            "Transition DOLFINx 0.3.0 monolithic dry run "
+            f"with contact backend '{contact_backend}'."
+        ),
     )
 
-    R_u = create_petsc_vector(layout.ndof_u, comm)
-    R_phi = create_petsc_vector(layout.ndof_phi, comm)
-    R = create_petsc_vector(layout.total_dofs, comm)
-    K_uu = create_petsc_matrix(layout.ndof_u, layout.ndof_u, comm)
-    K_uphi = create_petsc_matrix(layout.ndof_u, layout.ndof_phi, comm)
-    K_phiu = create_petsc_matrix(layout.ndof_phi, layout.ndof_u, comm)
-    K_phiphi = create_petsc_matrix(layout.ndof_phi, layout.ndof_phi, comm)
-    K = create_petsc_matrix(layout.total_dofs, layout.total_dofs, comm)
 
-    for contribution in solid_contributions:
-        _assemble_solid_block_pair(contribution, R_u, R, K_uu, K)
-    for contribution in sdf_contributions:
-        _assemble_sdf_block_pair(contribution, layout, R_phi, R, K_phiu, K_phiphi, K)
-    for contribution in contact_contributions:
-        _assemble_contact_block_pair(contribution, layout, R_u, R, K_uu, K_uphi, K)
-
-    assemble_petsc_objects(R_u, R_phi, R, K_uu, K_uphi, K_phiu, K_phiphi, K)
-    return Dolfinx0p3MonolithicDryRunResult(
-        plan=plan,
-        R_u=R_u,
-        R_phi=R_phi,
-        R=R,
-        K_uu=K_uu,
-        K_uphi=K_uphi,
-        K_phiu=K_phiu,
-        K_phiphi=K_phiphi,
-        K=K,
-        solid_contributions=solid_contributions,
-        sdf_contributions=sdf_contributions,
-        contact_contributions=contact_contributions,
-    )
-
-
-__all__ = ["Dolfinx0p3MonolithicDryRunResult", "assemble_monolithic_dry_run"]
+__all__ = [
+    "Dolfinx0p3MonolithicDryRunResult",
+    "assemble_monolithic_dry_run",
+    "assemble_monolithic_from_local_contributions",
+]

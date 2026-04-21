@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from dolfinx import mesh as dmesh
 from petsc4py import PETSc
 
 
@@ -32,6 +33,16 @@ def scalar_function_values(function: object) -> np.ndarray:
     """Return the global local-array view of a DOLFINx 0.3.0 function vector."""
 
     return np.asarray(function.vector.getArray(), dtype=float)
+
+
+def set_function_values(function: object, values: object) -> None:
+    """Set the full local-array view of a DOLFINx 0.3.0 function vector."""
+
+    array = np.asarray(values, dtype=float)
+    current = np.asarray(function.vector.getArray(), dtype=float)
+    if array.shape != current.shape:
+        raise ValueError(f"values must have shape {current.shape!r}, got {array.shape!r}")
+    function.vector.setArray(array.copy())
 
 
 def barycentric_coordinates(point: object, triangle_coordinates: object) -> np.ndarray:
@@ -104,6 +115,42 @@ def facet_midpoint_length_and_outward_normal(
     return midpoint, length, normal
 
 
+def locate_boundary_facets(mesh: object, selector: str = "all") -> np.ndarray:
+    """Return boundary facets selected by a tiny named subset contract.
+
+    Supported selectors in 2D:
+
+    - ``"all"``
+    - ``"top"``
+    - ``"bottom"``
+    - ``"left"``
+    - ``"right"``
+    """
+
+    tdim = mesh.topology.dim
+    fdim = tdim - 1
+    bounds_min = np.asarray(mesh.geometry.x[:, :tdim], dtype=float).min(axis=0)
+    bounds_max = np.asarray(mesh.geometry.x[:, :tdim], dtype=float).max(axis=0)
+    selector_name = str(selector).lower()
+
+    if selector_name == "all":
+        locator = lambda x: np.full(x.shape[1], True, dtype=bool)
+    elif selector_name == "top":
+        locator = lambda x: np.isclose(x[1], bounds_max[1])
+    elif selector_name == "bottom":
+        locator = lambda x: np.isclose(x[1], bounds_min[1])
+    elif selector_name == "left":
+        locator = lambda x: np.isclose(x[0], bounds_min[0])
+    elif selector_name == "right":
+        locator = lambda x: np.isclose(x[0], bounds_max[0])
+    else:
+        raise ValueError(
+            "selector must be one of {'all', 'top', 'bottom', 'left', 'right'}, "
+            f"got {selector!r}"
+        )
+    return np.asarray(dmesh.locate_entities_boundary(mesh, fdim, locator), dtype=np.int32)
+
+
 def create_petsc_vector(size: int, comm: object) -> PETSc.Vec:
     """Create a PETSc vector for the current transition adapter."""
 
@@ -118,6 +165,8 @@ def create_petsc_matrix(nrow: int, ncol: int, comm: object) -> PETSc.Mat:
     mat = PETSc.Mat().createAIJ(size=(nrow, ncol), nnz=max(1, ncol), comm=comm)
     mat.setOption(PETSc.Mat.Option.NEW_NONZERO_ALLOCATION_ERR, False)
     mat.zeroEntries()
+    mat.assemblyBegin()
+    mat.assemblyEnd()
     return mat
 
 
@@ -161,6 +210,8 @@ __all__ = [
     "expand_block_dofs",
     "facet_midpoint_length_and_outward_normal",
     "function_space_dimension",
+    "locate_boundary_facets",
     "scalar_function_values",
+    "set_function_values",
     "triangle_area_and_shape_gradients",
 ]
