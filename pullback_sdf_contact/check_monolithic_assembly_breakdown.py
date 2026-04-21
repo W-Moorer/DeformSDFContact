@@ -47,6 +47,7 @@ def _resolve_reuse_defaults(args, recommended, resolved_pc_type, resolved_block_
 
 def _rows_from_result(result, summary):
     rows = []
+    include_kphiu_reuse = str(summary.get("kphiu_reassembly_policy", "always")) != "always"
     for accepted_idx, item in enumerate(result.get("accepted_history", []), start=1):
         nsteps = len(item.get("linear_iterations_list", []))
         for idx in range(nsteps):
@@ -136,6 +137,27 @@ def _rows_from_result(result, summary):
                 "phi_kphiphi_convert_time",
                 "phi_form_time_R_phi",
                 "phi_form_time_K_phi_u",
+                "K_phi_u_pre_assemble_overhead_time",
+                "K_phi_u_assemble_call_time",
+                "K_phi_u_post_assemble_immediate_time",
+                "K_phi_u_assembly_target_cell_count",
+                "K_phi_u_assembly_target_facet_count",
+                "K_phi_u_target_u_dof_count",
+                "K_phi_u_target_phi_dof_count",
+                "K_phi_u_output_nnz",
+                "K_phi_u_output_density",
+                "K_phi_u_active_row_count",
+                "K_phi_u_active_col_count",
+                "K_phi_u_active_row_fraction",
+                "K_phi_u_active_col_fraction",
+                "contact_candidate_point_count",
+                "contact_active_point_count",
+                "contact_active_fraction",
+                "K_phi_u_rows_touched_by_active_contact",
+                "K_phi_u_cols_touched_by_active_contact",
+                "K_phi_u_active_support_row_fraction",
+                "K_phi_u_active_support_col_fraction",
+                "K_phi_u_active_support_fraction",
                 "phi_form_time_K_phi_phi",
                 "phi_extract_time_K_phi_u",
                 "phi_convert_time_K_phi_u",
@@ -167,6 +189,20 @@ def _rows_from_result(result, summary):
                 "newton_step_walltime",
             ):
                 row[key] = _list_value(key)
+            if include_kphiu_reuse:
+                row["kphiu_reassembly_policy"] = summary.get("kphiu_reassembly_policy", "always")
+                for key in (
+                    "K_phi_u_reassemble_count",
+                    "K_phi_u_reuse_hit_count",
+                    "K_phi_u_reuse_miss_count",
+                    "K_phi_u_reuse_hit_rate",
+                    "K_phi_u_support_signature_change_count",
+                    "K_phi_u_reuse_miss_no_cache",
+                    "K_phi_u_reuse_miss_step_changed",
+                    "K_phi_u_reuse_miss_signature_changed",
+                    "K_phi_u_reuse_miss_cutback_or_restart",
+                ):
+                    row[key] = _list_value(key)
             for key in (
                 "reused_global_matrix",
                 "reused_global_rhs_vec",
@@ -190,6 +226,7 @@ def _rows_from_result(result, summary):
 def _summary_from_rows(summary, rows):
     if not rows:
         return summary
+    include_kphiu_reuse = "K_phi_u_reassemble_count" in rows[0]
     totals = {}
     float_keys = (
         "assembly_time",
@@ -228,6 +265,16 @@ def _summary_from_rows(summary, rows):
         "phi_kphiphi_convert_time",
         "phi_form_time_R_phi",
         "phi_form_time_K_phi_u",
+        "K_phi_u_pre_assemble_overhead_time",
+        "K_phi_u_assemble_call_time",
+        "K_phi_u_post_assemble_immediate_time",
+        "K_phi_u_output_density",
+        "K_phi_u_active_row_fraction",
+        "K_phi_u_active_col_fraction",
+        "contact_active_fraction",
+        "K_phi_u_active_support_row_fraction",
+        "K_phi_u_active_support_col_fraction",
+        "K_phi_u_active_support_fraction",
         "phi_form_time_K_phi_phi",
         "phi_extract_time_K_phi_u",
         "phi_convert_time_K_phi_u",
@@ -246,6 +293,8 @@ def _summary_from_rows(summary, rows):
     )
     for key in float_keys:
         totals[f"total_{key}"] = float(sum(row.get(key, 0.0) for row in rows))
+    if include_kphiu_reuse:
+        totals["K_phi_u_reuse_hit_rate"] = 0.0
     int_keys = (
         "contact_geometry_eval_call_count",
         "contact_query_call_count",
@@ -278,9 +327,32 @@ def _summary_from_rows(summary, rows):
         "phi_matrix_extract_call_count_K_phi_phi",
         "phi_matrix_convert_call_count_K_phi_phi",
         "phi_scatter_pattern_build_count",
+        "K_phi_u_assembly_target_cell_count",
+        "K_phi_u_assembly_target_facet_count",
+        "K_phi_u_target_u_dof_count",
+        "K_phi_u_target_phi_dof_count",
+        "K_phi_u_output_nnz",
+        "K_phi_u_active_row_count",
+        "K_phi_u_active_col_count",
+        "contact_candidate_point_count",
+        "contact_active_point_count",
+        "K_phi_u_rows_touched_by_active_contact",
+        "K_phi_u_cols_touched_by_active_contact",
     )
     for key in int_keys:
         totals[f"total_{key}"] = int(sum(row.get(key, 0) for row in rows))
+    if include_kphiu_reuse:
+        for key in (
+            "K_phi_u_reassemble_count",
+            "K_phi_u_reuse_hit_count",
+            "K_phi_u_reuse_miss_count",
+            "K_phi_u_support_signature_change_count",
+            "K_phi_u_reuse_miss_no_cache",
+            "K_phi_u_reuse_miss_step_changed",
+            "K_phi_u_reuse_miss_signature_changed",
+            "K_phi_u_reuse_miss_cutback_or_restart",
+        ):
+            totals[f"total_{key}"] = int(sum(row.get(key, 0) for row in rows))
     summary.update(totals)
     geometry_calls = max(summary.get("total_contact_geometry_eval_call_count", 0), 1)
     summary["avg_contact_geometry_eval_time_per_call"] = (
@@ -300,6 +372,13 @@ def _summary_from_rows(summary, rows):
     summary["phi_form_cache_hit_rate"] = (
         0.0 if phi_form_calls == 0 else float(phi_form_hits) / float(phi_form_calls)
     )
+    if include_kphiu_reuse:
+        reuse_decisions = summary.get("total_K_phi_u_reuse_hit_count", 0) + summary.get("total_K_phi_u_reuse_miss_count", 0)
+        summary["K_phi_u_reuse_hit_rate"] = (
+            0.0
+            if reuse_decisions == 0
+            else float(summary.get("total_K_phi_u_reuse_hit_count", 0)) / float(reuse_decisions)
+        )
     return summary
 
 
@@ -345,21 +424,70 @@ def _run_single_newton(args, resolved):
         phi_scatter_reuse=args.phi_scatter_reuse,
         profile_phi_detail=(args.phi_profile_mode == "full"),
         phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
+        kphiu_reassembly_policy=args.kphiu_reassembly_policy,
         verbose=False,
     )
     rows = []
+    include_kphiu_reuse = str(args.kphiu_reassembly_policy) != "always"
     for row in info.get("history", []):
         row_copy = dict(row)
+        if not include_kphiu_reuse:
+            row_copy.pop("K_phi_u_reassembly_policy", None)
+            row_copy.pop("K_phi_u_reassemble_count", None)
+            row_copy.pop("K_phi_u_reuse_hit_count", None)
+            row_copy.pop("K_phi_u_reuse_miss_count", None)
+            row_copy.pop("K_phi_u_reuse_hit_rate", None)
+            row_copy.pop("K_phi_u_support_signature_change_count", None)
+            row_copy.pop("K_phi_u_reuse_miss_no_cache", None)
+            row_copy.pop("K_phi_u_reuse_miss_step_changed", None)
+            row_copy.pop("K_phi_u_reuse_miss_signature_changed", None)
+            row_copy.pop("K_phi_u_reuse_miss_cutback_or_restart", None)
+            row_copy.pop("K_phi_u_reused_this_step", None)
+            row_copy.pop("K_phi_u_reuse_miss_reason", None)
         row_copy["mode"] = args.mode
         row_copy["load_value"] = float(nonzero_step["load_value"])
         for key in (
             "phi_form_time_R_phi",
             "phi_form_time_K_phi_u",
+            "K_phi_u_pre_assemble_overhead_time",
+            "K_phi_u_assemble_call_time",
+            "K_phi_u_post_assemble_immediate_time",
+            "K_phi_u_assembly_target_cell_count",
+            "K_phi_u_assembly_target_facet_count",
+            "K_phi_u_target_u_dof_count",
+            "K_phi_u_target_phi_dof_count",
+            "K_phi_u_output_nnz",
+            "K_phi_u_output_density",
+            "K_phi_u_active_row_count",
+            "K_phi_u_active_col_count",
+            "K_phi_u_active_row_fraction",
+            "K_phi_u_active_col_fraction",
+            "contact_candidate_point_count",
+            "contact_active_point_count",
+            "contact_active_fraction",
+            "K_phi_u_rows_touched_by_active_contact",
+            "K_phi_u_cols_touched_by_active_contact",
+            "K_phi_u_active_support_row_fraction",
+            "K_phi_u_active_support_col_fraction",
+            "K_phi_u_active_support_fraction",
             "phi_form_time_K_phi_phi",
             "phi_convert_time_K_phi_u",
             "phi_convert_time_K_phi_phi",
         ):
             row_copy.setdefault(key, 0.0)
+        if include_kphiu_reuse:
+            for key in (
+                "K_phi_u_reassemble_count",
+                "K_phi_u_reuse_hit_count",
+                "K_phi_u_reuse_miss_count",
+                "K_phi_u_reuse_hit_rate",
+                "K_phi_u_support_signature_change_count",
+                "K_phi_u_reuse_miss_no_cache",
+                "K_phi_u_reuse_miss_step_changed",
+                "K_phi_u_reuse_miss_signature_changed",
+                "K_phi_u_reuse_miss_cutback_or_restart",
+            ):
+                row_copy.setdefault(key, 0.0)
         rows.append(row_copy)
     summary = {
         "mode": args.mode,
@@ -385,6 +513,8 @@ def _run_single_newton(args, resolved):
         "final_reaction_norm": float(info.get("reaction_norm", 0.0)),
         "final_max_penetration": float(info.get("max_penetration", 0.0)),
     }
+    if str(args.kphiu_reassembly_policy) != "always":
+        summary["kphiu_reassembly_policy"] = args.kphiu_reassembly_policy
     return _summary_from_rows(summary, rows), rows
 
 
@@ -418,6 +548,7 @@ def _run_loadpath(args, resolved):
         phi_scatter_reuse=args.phi_scatter_reuse,
         phi_profile_mode=args.phi_profile_mode,
         phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
+        kphiu_reassembly_policy=args.kphiu_reassembly_policy,
         write_outputs=False,
         verbose=False,
     )
@@ -427,6 +558,8 @@ def _run_loadpath(args, resolved):
     summary["phi_scatter_reuse"] = bool(args.phi_scatter_reuse)
     summary["phi_profile_mode"] = args.phi_profile_mode
     summary["phi_matrix_assembly_backend"] = args.phi_matrix_assembly_backend
+    if str(args.kphiu_reassembly_policy) != "always":
+        summary["kphiu_reassembly_policy"] = args.kphiu_reassembly_policy
     return summary, rows
 
 
@@ -445,6 +578,8 @@ def _print_summary(summary, rows):
         print(f"phi_profile_mode = {summary['phi_profile_mode']}")
     if "phi_matrix_assembly_backend" in summary:
         print(f"phi_matrix_assembly_backend = {summary['phi_matrix_assembly_backend']}")
+    if "kphiu_reassembly_policy" in summary:
+        print(f"kphiu_reassembly_policy = {summary['kphiu_reassembly_policy']}")
     print(f"linear_solver_mode = {summary['linear_solver_mode']}")
     print(f"ksp_type = {summary['ksp_type']}")
     print(f"pc_type = {summary['pc_type']}")
@@ -479,6 +614,9 @@ def _print_summary(summary, rows):
         "total_phi_rhs_extract_time",
         "total_phi_form_time_R_phi",
         "total_phi_form_time_K_phi_u",
+        "total_K_phi_u_pre_assemble_overhead_time",
+        "total_K_phi_u_assemble_call_time",
+        "total_K_phi_u_post_assemble_immediate_time",
         "total_phi_form_time_K_phi_phi",
         "total_phi_extract_time_K_phi_u",
         "total_phi_convert_time_K_phi_u",
@@ -525,6 +663,19 @@ def _print_summary(summary, rows):
     ):
         if key in summary:
             print(f"{key} = {summary[key]}")
+    for key in (
+        "total_K_phi_u_reassemble_count",
+        "total_K_phi_u_reuse_hit_count",
+        "total_K_phi_u_reuse_miss_count",
+        "K_phi_u_reuse_hit_rate",
+        "total_K_phi_u_support_signature_change_count",
+        "total_K_phi_u_reuse_miss_no_cache",
+        "total_K_phi_u_reuse_miss_step_changed",
+        "total_K_phi_u_reuse_miss_signature_changed",
+        "total_K_phi_u_reuse_miss_cutback_or_restart",
+    ):
+        if key in summary:
+            print(f"{key} = {summary[key]}")
     print("per_newton_rows:")
     for row in rows:
         row_display = dict(row)
@@ -536,13 +687,28 @@ def _print_summary(summary, rows):
             "phi_convert_time_K_phi_phi",
         ):
             row_display.setdefault(key, 0.0)
+        reuse_fragment = ""
+        if "K_phi_u_reassemble_count" in row_display:
+            reuse_fragment = (
+                f" Kphiu_reasm={row_display.get('K_phi_u_reassemble_count', 0)} "
+                f"hit={row_display.get('K_phi_u_reuse_hit_count', 0)} "
+                f"miss={row_display.get('K_phi_u_reuse_miss_count', 0)} "
+            )
         print(
             "  load={load_value:.4f} newton={newton} "
             "lin_it={linear_iterations} ksp_reason={ksp_reason} "
             "asm={assembly_time:.4f}s contact={contact_block_assembly_time:.4f}s "
             "phi={phi_block_assembly_time:.4f}s phi_form={phi_form_assembly_time:.4f}s "
             "Rphi_form={phi_form_time_R_phi:.4f}s "
-            "Kphiu_form={phi_form_time_K_phi_u:.4f}s Kphiu_conv={phi_convert_time_K_phi_u:.4f}s "
+            "Kphiu_form={phi_form_time_K_phi_u:.4f}s "
+            "Kphiu_pre={K_phi_u_pre_assemble_overhead_time:.4f}s "
+            "Kphiu_asm={K_phi_u_assemble_call_time:.4f}s "
+            "Kphiu_post={K_phi_u_post_assemble_immediate_time:.4f}s "
+            "Kphiu_rows={K_phi_u_active_row_count}/{K_phi_u_target_phi_dof_count} "
+            "Kphiu_cols={K_phi_u_active_col_count}/{K_phi_u_target_u_dof_count} "
+            "act_pts={contact_active_point_count}/{contact_candidate_point_count} "
+            "{reuse_fragment}"
+            "Kphiu_conv={phi_convert_time_K_phi_u:.4f}s "
             "Kphiphi_form={phi_form_time_K_phi_phi:.4f}s Kphiphi_conv={phi_convert_time_K_phi_phi:.4f}s "
             "phi_mextract={phi_matrix_extract_time:.4f}s phi_mconvert={phi_matrix_convert_time:.4f}s "
             "build={block_build_time:.4f}s "
@@ -554,6 +720,7 @@ def _print_summary(summary, rows):
             "res_after={outer_residual_norm_after_linear:.6e} "
             "red={relative_linear_reduction:.6e}".format(
                 newton=row_display.get("newton_iteration", row_display.get("newton_iteration_within_load", 0)),
+                reuse_fragment=reuse_fragment,
                 **row_display,
             )
         )
@@ -593,6 +760,11 @@ def main():
     parser.add_argument(
         "--phi-matrix-assembly-backend",
         choices=["python", "cpp_petsc"],
+        default=None,
+    )
+    parser.add_argument(
+        "--kphiu-reassembly-policy",
+        choices=["always", "reuse_when_support_signature_unchanged"],
         default=None,
     )
     parser.add_argument("--max-load-steps", type=int, default=None)
@@ -660,6 +832,8 @@ def main():
             args.phi_matrix_assembly_backend = str(
                 recommended["phi_matrix_assembly_backend"]
             )
+        if args.kphiu_reassembly_policy is None:
+            args.kphiu_reassembly_policy = str(recommended["kphiu_reassembly_policy"])
 
         print(f"=== build_path = {build_path} ===")
         print(f"reuse_ksp = {reuse_ksp}")
@@ -692,6 +866,8 @@ def main():
             f"_phiProf{args.phi_profile_mode}"
         )
         base_name += f"_phiAsm{args.phi_matrix_assembly_backend}"
+        if str(args.kphiu_reassembly_policy) != "always":
+            base_name += f"_kphiuReuse{args.kphiu_reassembly_policy}"
         if args.single_newton_benchmark:
             base_name += "_single_newton"
         _write_outputs(base_name, summary, rows)

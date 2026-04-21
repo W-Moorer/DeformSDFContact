@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import os
 import time
 import numpy as np
@@ -28,6 +29,7 @@ RECOMMENDED_MONOLITHIC_PHI_CACHE_PRIME = True
 RECOMMENDED_MONOLITHIC_PHI_SCATTER_REUSE = True
 RECOMMENDED_MONOLITHIC_PHI_PROFILE_MODE = "light"
 RECOMMENDED_MONOLITHIC_PHI_MATRIX_ASSEMBLY_BACKEND = "python"
+RECOMMENDED_MONOLITHIC_KPHIU_REASSEMBLY_POLICY = "always"
 
 BLOCK_PC_CONFIGS = {
     "fieldsplit_additive_ilu": {
@@ -84,6 +86,7 @@ def recommended_monolithic_contact_options(**overrides):
         "phi_scatter_reuse": RECOMMENDED_MONOLITHIC_PHI_SCATTER_REUSE,
         "phi_profile_mode": RECOMMENDED_MONOLITHIC_PHI_PROFILE_MODE,
         "phi_matrix_assembly_backend": RECOMMENDED_MONOLITHIC_PHI_MATRIX_ASSEMBLY_BACKEND,
+        "kphiu_reassembly_policy": RECOMMENDED_MONOLITHIC_KPHIU_REASSEMBLY_POLICY,
     }
     options.update(overrides)
     return options
@@ -144,7 +147,7 @@ def _get_or_create_phi_form_cache(state):
     return cache
 
 
-def _phi_profile_template(profile_phi_detail=False):
+def _phi_profile_template(profile_phi_detail=False, include_kphiu_reuse=False):
     profile = {
         "phi_form_assembly_time": 0.0,
         "phi_matrix_extract_time": 0.0,
@@ -180,12 +183,46 @@ def _phi_profile_template(profile_phi_detail=False):
         "reused_phi_kphiphi_mat": False,
         "reused_phi_dense_buffers": False,
     }
+    if include_kphiu_reuse:
+        profile.update(
+            {
+                "K_phi_u_reassemble_count": 0,
+                "K_phi_u_reuse_hit_count": 0,
+                "K_phi_u_reuse_miss_count": 0,
+                "K_phi_u_support_signature_change_count": 0,
+                "K_phi_u_reuse_miss_no_cache": 0,
+                "K_phi_u_reuse_miss_step_changed": 0,
+                "K_phi_u_reuse_miss_signature_changed": 0,
+                "K_phi_u_reuse_miss_cutback_or_restart": 0,
+            }
+        )
     if profile_phi_detail:
         profile.update(
             {
                 "phi_form_time_R_phi": 0.0,
                 "phi_form_time_K_phi_u": 0.0,
                 "phi_form_time_K_phi_phi": 0.0,
+                "K_phi_u_pre_assemble_overhead_time": 0.0,
+                "K_phi_u_assemble_call_time": 0.0,
+                "K_phi_u_post_assemble_immediate_time": 0.0,
+                "K_phi_u_assembly_target_cell_count": 0,
+                "K_phi_u_assembly_target_facet_count": 0,
+                "K_phi_u_target_u_dof_count": 0,
+                "K_phi_u_target_phi_dof_count": 0,
+                "K_phi_u_output_nnz": 0,
+                "K_phi_u_output_density": 0.0,
+                "K_phi_u_active_row_count": 0,
+                "K_phi_u_active_col_count": 0,
+                "K_phi_u_active_row_fraction": 0.0,
+                "K_phi_u_active_col_fraction": 0.0,
+                "K_phi_u_rows_touched_by_active_contact": 0,
+                "K_phi_u_cols_touched_by_active_contact": 0,
+                "K_phi_u_active_support_row_fraction": 0.0,
+                "K_phi_u_active_support_col_fraction": 0.0,
+                "K_phi_u_active_support_fraction": 0.0,
+                "contact_candidate_point_count": 0,
+                "contact_active_point_count": 0,
+                "contact_active_fraction": 0.0,
                 "phi_extract_time_K_phi_u": 0.0,
                 "phi_convert_time_K_phi_u": 0.0,
                 "phi_extract_time_K_phi_phi": 0.0,
@@ -241,6 +278,9 @@ def _get_or_create_phi_cache(state, profile=None):
             "J_phiu_scatter_cols": None,
             "J_phiphi_scatter_rows": None,
             "J_phiphi_scatter_cols": None,
+            "K_phi_u_reuse_signature": None,
+            "K_phi_u_reuse_step_id": None,
+            "K_phi_u_reuse_cache_valid": False,
         }
         state["_monolithic_phi_cache"] = cache
         if profile is not None:
@@ -332,23 +372,44 @@ def _assemble_matrix_dense_compiled_reuse(
     scatter_rows=None,
     scatter_cols=None,
     track_scatter_build=False,
+    track_form_inner=False,
     assembly_backend="python",
 ):
-    mat.zeroEntries()
-    if assembly_backend == "python":
-        fem.assemble_matrix(mat, compiled_form)
-    elif assembly_backend == "cpp_petsc":
-        cpp.fem.assemble_matrix_petsc(mat, getattr(compiled_form, "_cpp_object", compiled_form), [])
+    pre_assemble_overhead_time = 0.0
+    assemble_call_time = 0.0
+    post_assemble_immediate_time = 0.0
+    if track_form_inner:
+        pre_t0 = time.perf_counter()
+        mat.zeroEntries()
+        pre_assemble_overhead_time = time.perf_counter() - pre_t0
+        assemble_t0 = time.perf_counter()
+        if assembly_backend == "python":
+            fem.assemble_matrix(mat, compiled_form)
+        elif assembly_backend == "cpp_petsc":
+            cpp.fem.assemble_matrix_petsc(mat, getattr(compiled_form, "_cpp_object", compiled_form), [])
+        else:
+            raise ValueError(f"Unsupported phi_matrix_assembly_backend: {assembly_backend}")
+        assemble_call_time = time.perf_counter() - assemble_t0
+        post_t0 = time.perf_counter()
+        mat.assemble()
+        post_assemble_immediate_time = time.perf_counter() - post_t0
     else:
-        raise ValueError(f"Unsupported phi_matrix_assembly_backend: {assembly_backend}")
-    mat.assemble()
-    return _dense_from_csr(
+        mat.zeroEntries()
+        if assembly_backend == "python":
+            fem.assemble_matrix(mat, compiled_form)
+        elif assembly_backend == "cpp_petsc":
+            cpp.fem.assemble_matrix_petsc(mat, getattr(compiled_form, "_cpp_object", compiled_form), [])
+        else:
+            raise ValueError(f"Unsupported phi_matrix_assembly_backend: {assembly_backend}")
+        mat.assemble()
+    dense_out = _dense_from_csr(
         mat,
         dense_buffer=dense_buffer,
         scatter_rows=scatter_rows,
         scatter_cols=scatter_cols,
         track_scatter_build=track_scatter_build,
     )
+    return (*dense_out, float(pre_assemble_overhead_time), float(assemble_call_time), float(post_assemble_immediate_time))
 
 
 def _prime_phi_cache(state):
@@ -368,6 +429,101 @@ def _capture_phi_profile_detail(phi_profile, key, value):
 def _capture_phi_profile_count(phi_profile, key, value=1):
     if key in phi_profile:
         phi_profile[key] += int(value)
+
+
+def _mesh_entity_count(domain, dim):
+    topology = domain.topology
+    if dim < 0 or dim > topology.dim:
+        return 0
+    try:
+        topology.create_entities(dim)
+    except Exception:
+        pass
+    index_map = topology.index_map(dim)
+    if index_map is None:
+        return 0
+    return int(index_map.size_local + index_map.num_ghosts)
+
+
+def _form_target_entity_counts(domain, form_expr):
+    integral_types = set()
+    try:
+        for integral in form_expr.integrals():
+            integral_types.add(str(integral.integral_type()))
+    except Exception:
+        return 0, 0
+    cell_count = _mesh_entity_count(domain, domain.topology.dim) if "cell" in integral_types else 0
+    facet_integral_types = {"exterior_facet", "interior_facet", "facet"}
+    facet_count = (
+        _mesh_entity_count(domain, domain.topology.dim - 1)
+        if any(integral_type in integral_types for integral_type in facet_integral_types)
+        else 0
+    )
+    return int(cell_count), int(facet_count)
+
+
+def _dense_matrix_support_stats(matrix):
+    matrix_arr = np.asarray(matrix)
+    row_mask = np.any(matrix_arr != 0.0, axis=1)
+    col_mask = np.any(matrix_arr != 0.0, axis=0)
+    nnz = int(np.count_nonzero(matrix_arr))
+    total_entries = int(matrix_arr.shape[0] * matrix_arr.shape[1])
+    return {
+        "nnz": nnz,
+        "active_row_count": int(np.count_nonzero(row_mask)),
+        "active_col_count": int(np.count_nonzero(col_mask)),
+        "density": 0.0 if total_entries == 0 else float(nnz) / float(total_entries),
+        "target_phi_dof_count": int(matrix_arr.shape[0]),
+        "target_u_dof_count": int(matrix_arr.shape[1]),
+    }
+
+
+def _active_contact_support_from_point_data(point_data):
+    active_phi_dofs = set()
+    active_u_dofs = set()
+    candidate_count = 0
+    active_count = 0
+    for data in point_data or []:
+        candidate_count += 1
+        if not (float(data.get("g_n", 0.0)) < 0.0):
+            continue
+        active_count += 1
+        u_dofs = data.get("u_dofs")
+        phi_dofs = data.get("phi_dofs")
+        if u_dofs is not None:
+            active_u_dofs.update(int(v) for v in np.asarray(u_dofs, dtype=np.int64).ravel())
+        if phi_dofs is not None:
+            active_phi_dofs.update(int(v) for v in np.asarray(phi_dofs, dtype=np.int64).ravel())
+    return {
+        "contact_candidate_point_count": int(candidate_count),
+        "contact_active_point_count": int(active_count),
+        "contact_active_fraction": (
+            0.0 if candidate_count == 0 else float(active_count) / float(candidate_count)
+        ),
+        "K_phi_u_rows_touched_by_active_contact": int(len(active_phi_dofs)),
+        "K_phi_u_cols_touched_by_active_contact": int(len(active_u_dofs)),
+        "_active_phi_dofs": np.asarray(sorted(active_phi_dofs), dtype=np.int32),
+        "_active_u_dofs": np.asarray(sorted(active_u_dofs), dtype=np.int32),
+    }
+
+
+def _stable_int_array_digest(values):
+    arr = np.asarray(values, dtype=np.int32).ravel()
+    if arr.size == 0:
+        return "0"
+    return hashlib.blake2b(arr.tobytes(), digest_size=16).hexdigest()
+
+
+def _kphiu_support_signature_from_support(active_support):
+    active_phi_dofs = np.asarray(active_support.get("_active_phi_dofs", ()), dtype=np.int32)
+    active_u_dofs = np.asarray(active_support.get("_active_u_dofs", ()), dtype=np.int32)
+    return (
+        int(active_support.get("contact_active_point_count", 0)),
+        int(active_support.get("K_phi_u_rows_touched_by_active_contact", 0)),
+        int(active_support.get("K_phi_u_cols_touched_by_active_contact", 0)),
+        _stable_int_array_digest(active_phi_dofs),
+        _stable_int_array_digest(active_u_dofs),
+    )
 
 
 def _snapshot_state_fields(state):
@@ -396,6 +552,7 @@ def _restore_state_fields(state, snapshot):
 
 def _apply_step_data(state, step_data):
     state["current_step_id"] = int(step_data.get("step", state.get("current_step_id", 0)))
+    state["_kphiu_cutback_or_restart"] = bool(int(step_data.get("cutback_level", 0)) > 0)
     load_value = float(
         step_data.get("attempt_load", step_data.get("load_value", state.get("current_load_value", 0.0)))
     )
@@ -1155,6 +1312,10 @@ def assemble_monolithic_contact_system(
     phi_scatter_reuse=True,
     profile_phi_detail=True,
     phi_matrix_assembly_backend="python",
+    kphiu_reassembly_policy="always",
+    kphiu_current_step_id=None,
+    kphiu_current_newton_iteration=1,
+    kphiu_cutback_or_restart=False,
 ):
     """Assemble the monolithic block residual and Jacobian."""
     dof_layout = _state_dof_layout(state)
@@ -1188,7 +1349,11 @@ def assemble_monolithic_contact_system(
     contact_block_assembly_time = time.perf_counter() - contact_t0
 
     R_u_total = R_u_struct - contact["R_u_c"]
-    phi_profile = _phi_profile_template(profile_phi_detail=profile_phi_detail)
+    kphiu_reuse_enabled = kphiu_reassembly_policy == "reuse_when_support_signature_unchanged"
+    phi_profile = _phi_profile_template(
+        profile_phi_detail=profile_phi_detail,
+        include_kphiu_reuse=kphiu_reuse_enabled,
+    )
     phi_cache = None
     phi_form_cache_hits = 0
     phi_form_cache_misses = 0
@@ -1230,18 +1395,43 @@ def assemble_monolithic_contact_system(
         out["J_uphi"] = -contact["K_uphi_c"]
         compiled_K_phi_u = state["K_phi_u_form"] if phi_cache is None else phi_cache["K_phi_u_form"]
         compiled_K_phi_phi = state["K_phi_phi_form"] if phi_cache is None else phi_cache["K_phi_phi_form"]
+        kphiu_reassemble_count = 0
+        kphiu_reuse_hit_count = 0
+        kphiu_reuse_miss_count = 0
+        kphiu_support_signature_change_count = 0
+        kphiu_reuse_miss_no_cache = 0
+        kphiu_reuse_miss_step_changed = 0
+        kphiu_reuse_miss_signature_changed = 0
+        kphiu_reuse_miss_cutback_or_restart = 0
+        kphiu_reused_this_step = False
+        kphiu_reuse_miss_reason = ""
+        kphiu_active_support = None
+        kphiu_support_signature = None
         phiu_scatter_build_time = 0.0
         phiu_scatter_build_count = 0
+        phiu_pre_assemble_overhead_time = 0.0
+        phiu_assemble_call_time = 0.0
+        phiu_post_assemble_immediate_time = 0.0
         phiphi_scatter_build_time = 0.0
         phiphi_scatter_build_count = 0
         if phi_cache is None:
             compiled_K_phi_u = _compile_form(compiled_K_phi_u)
             compiled_K_phi_phi = _compile_form(compiled_K_phi_phi)
 
-            phiu_form_t0 = time.perf_counter()
+            phiu_pre_t0 = time.perf_counter()
+            phiu_mat = None
+            phiu_pre_assemble_overhead_time = time.perf_counter() - phiu_pre_t0
+            phiu_assemble_t0 = time.perf_counter()
             phiu_mat = fem.assemble_matrix(compiled_K_phi_u)
+            phiu_assemble_call_time = time.perf_counter() - phiu_assemble_t0
+            phiu_post_t0 = time.perf_counter()
             phiu_mat.assemble()
-            phiu_form_time = time.perf_counter() - phiu_form_t0
+            phiu_post_assemble_immediate_time = time.perf_counter() - phiu_post_t0
+            phiu_form_time = (
+                phiu_pre_assemble_overhead_time
+                + phiu_assemble_call_time
+                + phiu_post_assemble_immediate_time
+            )
             phiu_extract_t0 = time.perf_counter()
             out["J_phiu"] = dense_array_from_petsc_mat(phiu_mat)
             phiu_extract_time = time.perf_counter() - phiu_extract_t0
@@ -1257,25 +1447,128 @@ def assemble_monolithic_contact_system(
             phiphi_convert_time = 0.0
             phi_form_cache_misses += 2
         else:
-            phiu_form_t0 = time.perf_counter()
-            (
-                out["J_phiu"],
-                phiu_extract_time,
-                phiu_convert_time,
-                phi_cache["J_phiu_scatter_rows"],
-                phi_cache["J_phiu_scatter_cols"],
-                phiu_scatter_build_time,
-                phiu_scatter_build_count,
-            ) = _assemble_matrix_dense_compiled_reuse(
-                phi_cache["K_phi_u_mat"],
-                compiled_K_phi_u,
-                dense_buffer=phi_cache["J_phiu_dense"],
-                scatter_rows=phi_cache.get("J_phiu_scatter_rows") if phi_scatter_reuse else None,
-                scatter_cols=phi_cache.get("J_phiu_scatter_cols") if phi_scatter_reuse else None,
-                track_scatter_build=profile_phi_detail,
-                assembly_backend=phi_matrix_assembly_backend,
-            )
-            phiu_form_time = time.perf_counter() - phiu_form_t0 - phiu_extract_time - phiu_convert_time
+            if not kphiu_reuse_enabled:
+                phiu_form_t0 = time.perf_counter()
+                (
+                    out["J_phiu"],
+                    phiu_extract_time,
+                    phiu_convert_time,
+                    phi_cache["J_phiu_scatter_rows"],
+                    phi_cache["J_phiu_scatter_cols"],
+                    phiu_scatter_build_time,
+                    phiu_scatter_build_count,
+                    phiu_pre_assemble_overhead_time,
+                    phiu_assemble_call_time,
+                    phiu_post_assemble_immediate_time,
+                ) = _assemble_matrix_dense_compiled_reuse(
+                    phi_cache["K_phi_u_mat"],
+                    compiled_K_phi_u,
+                    dense_buffer=phi_cache["J_phiu_dense"],
+                    scatter_rows=phi_cache.get("J_phiu_scatter_rows") if phi_scatter_reuse else None,
+                    scatter_cols=phi_cache.get("J_phiu_scatter_cols") if phi_scatter_reuse else None,
+                    track_scatter_build=profile_phi_detail,
+                    track_form_inner=profile_phi_detail,
+                    assembly_backend=phi_matrix_assembly_backend,
+                )
+                if profile_phi_detail:
+                    phiu_form_time = (
+                        phiu_pre_assemble_overhead_time
+                        + phiu_assemble_call_time
+                        + phiu_post_assemble_immediate_time
+                    )
+                else:
+                    phiu_form_time = time.perf_counter() - phiu_form_t0 - phiu_extract_time - phiu_convert_time
+                kphiu_reassemble_count = 1
+            else:
+                current_step_id = int(
+                    state.get("current_step_id", 0) if kphiu_current_step_id is None else kphiu_current_step_id
+                )
+                reuse_kphiu = False
+                if kphiu_cutback_or_restart:
+                    kphiu_reuse_miss_reason = "cutback_or_restart"
+                elif not bool(phi_cache.get("K_phi_u_reuse_cache_valid", False)):
+                    kphiu_reuse_miss_reason = "no_cache"
+                elif int(kphiu_current_newton_iteration) <= 1:
+                    kphiu_reuse_miss_reason = "step_changed"
+                else:
+                    cached_step_id = int(phi_cache.get("K_phi_u_reuse_step_id", -1))
+                    if cached_step_id != current_step_id:
+                        kphiu_reuse_miss_reason = "step_changed"
+                    else:
+                        kphiu_active_support = _active_contact_support_from_point_data(
+                            contact.get("point_data", ())
+                        )
+                        kphiu_support_signature = _kphiu_support_signature_from_support(
+                            kphiu_active_support
+                        )
+                        cached_signature = phi_cache.get("K_phi_u_reuse_signature")
+                        if cached_signature != kphiu_support_signature:
+                            kphiu_reuse_miss_reason = "signature_changed"
+                        else:
+                            reuse_kphiu = True
+                if reuse_kphiu:
+                    kphiu_reuse_hit_count = 1
+                    kphiu_reused_this_step = True
+                    out["J_phiu"] = phi_cache["J_phiu_dense"].copy()
+                    phiu_form_time = 0.0
+                    phiu_extract_time = 0.0
+                    phiu_convert_time = 0.0
+                else:
+                    kphiu_reuse_miss_count = 1
+                    if kphiu_reuse_miss_reason == "no_cache":
+                        kphiu_reuse_miss_no_cache = 1
+                    elif kphiu_reuse_miss_reason == "step_changed":
+                        kphiu_reuse_miss_step_changed = 1
+                    elif kphiu_reuse_miss_reason == "signature_changed":
+                        kphiu_reuse_miss_signature_changed = 1
+                        kphiu_support_signature_change_count = 1
+                    elif kphiu_reuse_miss_reason == "cutback_or_restart":
+                        kphiu_reuse_miss_cutback_or_restart = 1
+                if not reuse_kphiu:
+                    phiu_form_t0 = time.perf_counter()
+                    (
+                        out["J_phiu"],
+                        phiu_extract_time,
+                        phiu_convert_time,
+                        phi_cache["J_phiu_scatter_rows"],
+                        phi_cache["J_phiu_scatter_cols"],
+                        phiu_scatter_build_time,
+                        phiu_scatter_build_count,
+                        phiu_pre_assemble_overhead_time,
+                        phiu_assemble_call_time,
+                        phiu_post_assemble_immediate_time,
+                    ) = _assemble_matrix_dense_compiled_reuse(
+                        phi_cache["K_phi_u_mat"],
+                        compiled_K_phi_u,
+                        dense_buffer=phi_cache["J_phiu_dense"],
+                        scatter_rows=phi_cache.get("J_phiu_scatter_rows") if phi_scatter_reuse else None,
+                        scatter_cols=phi_cache.get("J_phiu_scatter_cols") if phi_scatter_reuse else None,
+                        track_scatter_build=profile_phi_detail,
+                        track_form_inner=profile_phi_detail,
+                        assembly_backend=phi_matrix_assembly_backend,
+                    )
+                    if profile_phi_detail:
+                        phiu_form_time = (
+                            phiu_pre_assemble_overhead_time
+                            + phiu_assemble_call_time
+                            + phiu_post_assemble_immediate_time
+                        )
+                    else:
+                        phiu_form_time = time.perf_counter() - phiu_form_t0 - phiu_extract_time - phiu_convert_time
+                    kphiu_reassemble_count = 1
+                    if kphiu_support_signature is None:
+                        kphiu_active_support = _active_contact_support_from_point_data(contact.get("point_data", ()))
+                        kphiu_support_signature = _kphiu_support_signature_from_support(
+                            kphiu_active_support
+                        )
+                    phi_cache["K_phi_u_reuse_signature"] = kphiu_support_signature
+                    phi_cache["K_phi_u_reuse_step_id"] = int(current_step_id)
+                    phi_cache["K_phi_u_reuse_cache_valid"] = True
+                else:
+                    if profile_phi_detail:
+                        phiu_pre_assemble_overhead_time = 0.0
+                        phiu_assemble_call_time = 0.0
+                        phiu_post_assemble_immediate_time = 0.0
 
             phiphi_form_t0 = time.perf_counter()
             (
@@ -1286,6 +1579,9 @@ def assemble_monolithic_contact_system(
                 phi_cache["J_phiphi_scatter_cols"],
                 phiphi_scatter_build_time,
                 phiphi_scatter_build_count,
+                _phiphi_pre_assemble_overhead_time,
+                _phiphi_assemble_call_time,
+                _phiphi_post_assemble_immediate_time,
             ) = _assemble_matrix_dense_compiled_reuse(
                 phi_cache["K_phi_phi_mat"],
                 compiled_K_phi_phi,
@@ -1307,6 +1603,76 @@ def assemble_monolithic_contact_system(
         out["nnz_Juphi"] = _nnz_dense(out["J_uphi"])
         out["nnz_Jphiu"] = _nnz_dense(out["J_phiu"])
         out["nnz_Jphiphi"] = _nnz_dense(out["J_phiphi"])
+        if kphiu_reuse_enabled:
+            out["K_phi_u_reassembly_policy"] = str(kphiu_reassembly_policy)
+            out["K_phi_u_reassemble_count"] = int(kphiu_reassemble_count)
+            out["K_phi_u_reuse_hit_count"] = int(kphiu_reuse_hit_count)
+            out["K_phi_u_reuse_miss_count"] = int(kphiu_reuse_miss_count)
+            total_reuse_decisions = int(kphiu_reuse_hit_count + kphiu_reuse_miss_count)
+            out["K_phi_u_reuse_hit_rate"] = (
+                0.0 if total_reuse_decisions == 0 else float(kphiu_reuse_hit_count) / float(total_reuse_decisions)
+            )
+            out["K_phi_u_support_signature_change_count"] = int(kphiu_support_signature_change_count)
+            out["K_phi_u_reuse_miss_no_cache"] = int(kphiu_reuse_miss_no_cache)
+            out["K_phi_u_reuse_miss_step_changed"] = int(kphiu_reuse_miss_step_changed)
+            out["K_phi_u_reuse_miss_signature_changed"] = int(kphiu_reuse_miss_signature_changed)
+            out["K_phi_u_reuse_miss_cutback_or_restart"] = int(kphiu_reuse_miss_cutback_or_restart)
+            out["K_phi_u_reused_this_step"] = bool(kphiu_reused_this_step)
+            out["K_phi_u_reuse_miss_reason"] = kphiu_reuse_miss_reason
+        if profile_phi_detail:
+            kphiu_target_cell_count, kphiu_target_facet_count = _form_target_entity_counts(
+                state["domain"],
+                state["K_phi_u_form"],
+            )
+            kphiu_stats = _dense_matrix_support_stats(out["J_phiu"])
+            active_support_stats = (
+                kphiu_active_support
+                if kphiu_active_support is not None
+                else contact.get("diagnostics", {})
+            )
+            active_contact_rows = int(active_support_stats.get("K_phi_u_rows_touched_by_active_contact", 0))
+            active_contact_cols = int(active_support_stats.get("K_phi_u_cols_touched_by_active_contact", 0))
+            active_row_count = int(kphiu_stats["active_row_count"])
+            active_col_count = int(kphiu_stats["active_col_count"])
+            out.update(
+                {
+                    "K_phi_u_assembly_target_cell_count": int(kphiu_target_cell_count),
+                    "K_phi_u_assembly_target_facet_count": int(kphiu_target_facet_count),
+                    "K_phi_u_target_u_dof_count": int(kphiu_stats["target_u_dof_count"]),
+                    "K_phi_u_target_phi_dof_count": int(kphiu_stats["target_phi_dof_count"]),
+                    "K_phi_u_output_nnz": int(kphiu_stats["nnz"]),
+                    "K_phi_u_output_density": float(kphiu_stats["density"]),
+                    "K_phi_u_active_row_count": active_row_count,
+                    "K_phi_u_active_col_count": active_col_count,
+                    "K_phi_u_active_row_fraction": (
+                        0.0
+                        if kphiu_stats["target_phi_dof_count"] == 0
+                        else float(active_row_count) / float(kphiu_stats["target_phi_dof_count"])
+                    ),
+                    "K_phi_u_active_col_fraction": (
+                        0.0
+                        if kphiu_stats["target_u_dof_count"] == 0
+                        else float(active_col_count) / float(kphiu_stats["target_u_dof_count"])
+                    ),
+                    "contact_candidate_point_count": int(active_support_stats.get("contact_candidate_point_count", 0)),
+                    "contact_active_point_count": int(active_support_stats.get("contact_active_point_count", contact.get("diagnostics", {}).get("active_contact_points", 0))),
+                    "contact_active_fraction": float(active_support_stats.get("contact_active_fraction", contact.get("diagnostics", {}).get("contact_active_fraction", 0.0))),
+                    "K_phi_u_rows_touched_by_active_contact": active_contact_rows,
+                    "K_phi_u_cols_touched_by_active_contact": active_contact_cols,
+                    "K_phi_u_active_support_row_fraction": (
+                        0.0 if active_row_count == 0 else float(active_contact_rows) / float(active_row_count)
+                    ),
+                    "K_phi_u_active_support_col_fraction": (
+                        0.0 if active_col_count == 0 else float(active_contact_cols) / float(active_col_count)
+                    ),
+                    "K_phi_u_active_support_fraction": (
+                        0.0
+                        if active_row_count == 0 or active_col_count == 0
+                        else float(active_contact_rows * active_contact_cols)
+                        / float(active_row_count * active_col_count)
+                    ),
+                }
+            )
         out.update(
             _assemble_global_backend_objects(
                 state,
@@ -1409,6 +1775,21 @@ def assemble_monolithic_contact_system(
         if profile_phi_detail:
             _capture_phi_profile_detail(phi_profile, "phi_form_time_K_phi_u", float(phiu_form_time))
             _capture_phi_profile_detail(phi_profile, "phi_form_time_K_phi_phi", float(phiphi_form_time))
+            _capture_phi_profile_detail(
+                phi_profile,
+                "K_phi_u_pre_assemble_overhead_time",
+                float(phiu_pre_assemble_overhead_time),
+            )
+            _capture_phi_profile_detail(
+                phi_profile,
+                "K_phi_u_assemble_call_time",
+                float(phiu_assemble_call_time),
+            )
+            _capture_phi_profile_detail(
+                phi_profile,
+                "K_phi_u_post_assemble_immediate_time",
+                float(phiu_post_assemble_immediate_time),
+            )
             _capture_phi_profile_detail(phi_profile, "phi_extract_time_K_phi_u", float(phiu_extract_time))
             _capture_phi_profile_detail(phi_profile, "phi_convert_time_K_phi_u", float(phiu_convert_time))
             _capture_phi_profile_detail(phi_profile, "phi_extract_time_K_phi_phi", float(phiphi_extract_time))
@@ -1534,11 +1915,13 @@ def solve_monolithic_contact(
     phi_scatter_reuse=True,
     profile_phi_detail=True,
     phi_matrix_assembly_backend="python",
+    kphiu_reassembly_policy="always",
     verbose=True,
 ):
     """Solve one fixed-load monolithic contact state."""
     rank0 = state["domain"].mpi_comm().rank == 0
     dof_layout = _state_dof_layout(state)
+    kphiu_reuse_enabled = kphiu_reassembly_policy == "reuse_when_support_signature_unchanged"
     history = []
     failure_reason = ""
 
@@ -1560,6 +1943,10 @@ def solve_monolithic_contact(
             phi_scatter_reuse=phi_scatter_reuse,
             profile_phi_detail=profile_phi_detail,
             phi_matrix_assembly_backend=phi_matrix_assembly_backend,
+            kphiu_reassembly_policy=kphiu_reassembly_policy,
+            kphiu_current_step_id=state.get("current_step_id", 0),
+            kphiu_current_newton_iteration=newton_it,
+            kphiu_cutback_or_restart=bool(newton_it == 1 and state.get("_kphiu_cutback_or_restart", False)),
         )
         residual = assembled["global_residual_array"]
         residual_norm = float(np.linalg.norm(residual))
@@ -1677,6 +2064,37 @@ def solve_monolithic_contact(
                 **dof_layout,
                 "history": history,
             }
+            if kphiu_reuse_enabled:
+                info.update(
+                    {
+                        "K_phi_u_reassembly_policy": assembled.get(
+                            "K_phi_u_reassembly_policy", kphiu_reassembly_policy
+                        ),
+                        "K_phi_u_reassemble_count": int(assembled.get("K_phi_u_reassemble_count", 0)),
+                        "K_phi_u_reuse_hit_count": int(assembled.get("K_phi_u_reuse_hit_count", 0)),
+                        "K_phi_u_reuse_miss_count": int(assembled.get("K_phi_u_reuse_miss_count", 0)),
+                        "K_phi_u_reuse_hit_rate": float(assembled.get("K_phi_u_reuse_hit_rate", 0.0)),
+                        "K_phi_u_support_signature_change_count": int(
+                            assembled.get("K_phi_u_support_signature_change_count", 0)
+                        ),
+                        "K_phi_u_reuse_miss_no_cache": int(
+                            assembled.get("K_phi_u_reuse_miss_no_cache", 0)
+                        ),
+                        "K_phi_u_reuse_miss_step_changed": int(
+                            assembled.get("K_phi_u_reuse_miss_step_changed", 0)
+                        ),
+                        "K_phi_u_reuse_miss_signature_changed": int(
+                            assembled.get("K_phi_u_reuse_miss_signature_changed", 0)
+                        ),
+                        "K_phi_u_reuse_miss_cutback_or_restart": int(
+                            assembled.get("K_phi_u_reuse_miss_cutback_or_restart", 0)
+                        ),
+                        "K_phi_u_reused_this_step": bool(
+                            assembled.get("K_phi_u_reused_this_step", False)
+                        ),
+                        "K_phi_u_reuse_miss_reason": assembled.get("K_phi_u_reuse_miss_reason", ""),
+                    }
+                )
             if profile_phi_detail:
                 info.update(
                     {
@@ -1915,12 +2333,53 @@ def solve_monolithic_contact(
             "linear_iterations": linear_info["linear_iterations"],
             "ksp_reason": linear_info["ksp_reason"],
         }
+        if kphiu_reuse_enabled:
+            row.update(
+                {
+                    "K_phi_u_reassembly_policy": assembled.get(
+                        "K_phi_u_reassembly_policy", kphiu_reassembly_policy
+                    ),
+                    "K_phi_u_reassemble_count": int(assembled.get("K_phi_u_reassemble_count", 0)),
+                    "K_phi_u_reuse_hit_count": int(assembled.get("K_phi_u_reuse_hit_count", 0)),
+                    "K_phi_u_reuse_miss_count": int(assembled.get("K_phi_u_reuse_miss_count", 0)),
+                    "K_phi_u_reuse_hit_rate": float(assembled.get("K_phi_u_reuse_hit_rate", 0.0)),
+                    "K_phi_u_support_signature_change_count": int(
+                        assembled.get("K_phi_u_support_signature_change_count", 0)
+                    ),
+                    "K_phi_u_reuse_miss_no_cache": int(
+                        assembled.get("K_phi_u_reuse_miss_no_cache", 0)
+                    ),
+                    "K_phi_u_reuse_miss_step_changed": int(
+                        assembled.get("K_phi_u_reuse_miss_step_changed", 0)
+                    ),
+                    "K_phi_u_reuse_miss_signature_changed": int(
+                        assembled.get("K_phi_u_reuse_miss_signature_changed", 0)
+                    ),
+                    "K_phi_u_reuse_miss_cutback_or_restart": int(
+                        assembled.get("K_phi_u_reuse_miss_cutback_or_restart", 0)
+                    ),
+                    "K_phi_u_reused_this_step": bool(assembled.get("K_phi_u_reused_this_step", False)),
+                    "K_phi_u_reuse_miss_reason": assembled.get("K_phi_u_reuse_miss_reason", ""),
+                }
+            )
         if profile_phi_detail:
+            active_support = _active_contact_support_from_point_data(assembled.get("point_data", []))
+            active_row_count = int(assembled.get("K_phi_u_active_row_count", 0))
+            active_col_count = int(assembled.get("K_phi_u_active_col_count", 0))
             row.update(
                 {
                     "phi_form_time_R_phi": float(assembled.get("phi_form_time_R_phi", 0.0)),
                     "phi_form_time_K_phi_u": float(assembled.get("phi_form_time_K_phi_u", 0.0)),
                     "phi_form_time_K_phi_phi": float(assembled.get("phi_form_time_K_phi_phi", 0.0)),
+                    "K_phi_u_pre_assemble_overhead_time": float(
+                        assembled.get("K_phi_u_pre_assemble_overhead_time", 0.0)
+                    ),
+                    "K_phi_u_assemble_call_time": float(
+                        assembled.get("K_phi_u_assemble_call_time", 0.0)
+                    ),
+                    "K_phi_u_post_assemble_immediate_time": float(
+                        assembled.get("K_phi_u_post_assemble_immediate_time", 0.0)
+                    ),
                     "phi_extract_time_K_phi_u": float(assembled.get("phi_extract_time_K_phi_u", 0.0)),
                     "phi_convert_time_K_phi_u": float(assembled.get("phi_convert_time_K_phi_u", 0.0)),
                     "phi_extract_time_K_phi_phi": float(assembled.get("phi_extract_time_K_phi_phi", 0.0)),
@@ -1939,6 +2398,54 @@ def solve_monolithic_contact(
                     ),
                     "phi_matrix_convert_call_count_K_phi_phi": int(
                         assembled.get("phi_matrix_convert_call_count_K_phi_phi", 0)
+                    ),
+                    "K_phi_u_assembly_target_cell_count": int(
+                        assembled.get("K_phi_u_assembly_target_cell_count", 0)
+                    ),
+                    "K_phi_u_assembly_target_facet_count": int(
+                        assembled.get("K_phi_u_assembly_target_facet_count", 0)
+                    ),
+                    "K_phi_u_target_u_dof_count": int(assembled.get("K_phi_u_target_u_dof_count", 0)),
+                    "K_phi_u_target_phi_dof_count": int(assembled.get("K_phi_u_target_phi_dof_count", 0)),
+                    "K_phi_u_output_nnz": int(assembled.get("K_phi_u_output_nnz", 0)),
+                    "K_phi_u_output_density": float(assembled.get("K_phi_u_output_density", 0.0)),
+                    "K_phi_u_active_row_count": int(assembled.get("K_phi_u_active_row_count", 0)),
+                    "K_phi_u_active_col_count": int(assembled.get("K_phi_u_active_col_count", 0)),
+                    "K_phi_u_active_row_fraction": float(
+                        assembled.get("K_phi_u_active_row_fraction", 0.0)
+                    ),
+                    "K_phi_u_active_col_fraction": float(
+                        assembled.get("K_phi_u_active_col_fraction", 0.0)
+                    ),
+                    "contact_candidate_point_count": int(active_support["contact_candidate_point_count"]),
+                    "contact_active_point_count": int(active_support["contact_active_point_count"]),
+                    "contact_active_fraction": float(active_support["contact_active_fraction"]),
+                    "K_phi_u_rows_touched_by_active_contact": int(
+                        active_support["K_phi_u_rows_touched_by_active_contact"]
+                    ),
+                    "K_phi_u_cols_touched_by_active_contact": int(
+                        active_support["K_phi_u_cols_touched_by_active_contact"]
+                    ),
+                    "K_phi_u_active_support_row_fraction": (
+                        0.0
+                        if active_row_count == 0
+                        else float(active_support["K_phi_u_rows_touched_by_active_contact"])
+                        / float(active_row_count)
+                    ),
+                    "K_phi_u_active_support_col_fraction": (
+                        0.0
+                        if active_col_count == 0
+                        else float(active_support["K_phi_u_cols_touched_by_active_contact"])
+                        / float(active_col_count)
+                    ),
+                    "K_phi_u_active_support_fraction": (
+                        0.0
+                        if active_row_count == 0 or active_col_count == 0
+                        else float(
+                            active_support["K_phi_u_rows_touched_by_active_contact"]
+                            * active_support["K_phi_u_cols_touched_by_active_contact"]
+                        )
+                        / float(active_row_count * active_col_count)
                     ),
                 }
             )
@@ -1990,16 +2497,76 @@ def solve_monolithic_contact(
                 **dof_layout,
                 "history": history,
             }
+            if kphiu_reuse_enabled:
+                info.update(
+                    {
+                        "K_phi_u_reassembly_policy": row.get(
+                            "K_phi_u_reassembly_policy", kphiu_reassembly_policy
+                        ),
+                        "K_phi_u_reassemble_count": row.get("K_phi_u_reassemble_count", 0),
+                        "K_phi_u_reuse_hit_count": row.get("K_phi_u_reuse_hit_count", 0),
+                        "K_phi_u_reuse_miss_count": row.get("K_phi_u_reuse_miss_count", 0),
+                        "K_phi_u_reuse_hit_rate": row.get("K_phi_u_reuse_hit_rate", 0.0),
+                        "K_phi_u_support_signature_change_count": row.get(
+                            "K_phi_u_support_signature_change_count", 0
+                        ),
+                        "K_phi_u_reuse_miss_no_cache": row.get("K_phi_u_reuse_miss_no_cache", 0),
+                        "K_phi_u_reuse_miss_step_changed": row.get(
+                            "K_phi_u_reuse_miss_step_changed", 0
+                        ),
+                        "K_phi_u_reuse_miss_signature_changed": row.get(
+                            "K_phi_u_reuse_miss_signature_changed", 0
+                        ),
+                        "K_phi_u_reuse_miss_cutback_or_restart": row.get(
+                            "K_phi_u_reuse_miss_cutback_or_restart", 0
+                        ),
+                    }
+                )
             if profile_phi_detail:
                 info.update(
                     {
                         "phi_form_time_R_phi": row.get("phi_form_time_R_phi", 0.0),
                         "phi_form_time_K_phi_u": row.get("phi_form_time_K_phi_u", 0.0),
                         "phi_form_time_K_phi_phi": row.get("phi_form_time_K_phi_phi", 0.0),
+                        "K_phi_u_pre_assemble_overhead_time": row.get(
+                            "K_phi_u_pre_assemble_overhead_time", 0.0
+                        ),
+                        "K_phi_u_assemble_call_time": row.get("K_phi_u_assemble_call_time", 0.0),
+                        "K_phi_u_post_assemble_immediate_time": row.get(
+                            "K_phi_u_post_assemble_immediate_time", 0.0
+                        ),
                         "phi_extract_time_K_phi_u": row.get("phi_extract_time_K_phi_u", 0.0),
                         "phi_convert_time_K_phi_u": row.get("phi_convert_time_K_phi_u", 0.0),
                         "phi_extract_time_K_phi_phi": row.get("phi_extract_time_K_phi_phi", 0.0),
                         "phi_convert_time_K_phi_phi": row.get("phi_convert_time_K_phi_phi", 0.0),
+                        "K_phi_u_assembly_target_cell_count": row.get("K_phi_u_assembly_target_cell_count", 0),
+                        "K_phi_u_assembly_target_facet_count": row.get("K_phi_u_assembly_target_facet_count", 0),
+                        "K_phi_u_target_u_dof_count": row.get("K_phi_u_target_u_dof_count", 0),
+                        "K_phi_u_target_phi_dof_count": row.get("K_phi_u_target_phi_dof_count", 0),
+                        "K_phi_u_output_nnz": row.get("K_phi_u_output_nnz", 0),
+                        "K_phi_u_output_density": row.get("K_phi_u_output_density", 0.0),
+                        "K_phi_u_active_row_count": row.get("K_phi_u_active_row_count", 0),
+                        "K_phi_u_active_col_count": row.get("K_phi_u_active_col_count", 0),
+                        "K_phi_u_active_row_fraction": row.get("K_phi_u_active_row_fraction", 0.0),
+                        "K_phi_u_active_col_fraction": row.get("K_phi_u_active_col_fraction", 0.0),
+                        "contact_candidate_point_count": row.get("contact_candidate_point_count", 0),
+                        "contact_active_point_count": row.get("contact_active_point_count", 0),
+                        "contact_active_fraction": row.get("contact_active_fraction", 0.0),
+                        "K_phi_u_rows_touched_by_active_contact": row.get(
+                            "K_phi_u_rows_touched_by_active_contact", 0
+                        ),
+                        "K_phi_u_cols_touched_by_active_contact": row.get(
+                            "K_phi_u_cols_touched_by_active_contact", 0
+                        ),
+                        "K_phi_u_active_support_row_fraction": row.get(
+                            "K_phi_u_active_support_row_fraction", 0.0
+                        ),
+                        "K_phi_u_active_support_col_fraction": row.get(
+                            "K_phi_u_active_support_col_fraction", 0.0
+                        ),
+                        "K_phi_u_active_support_fraction": row.get(
+                            "K_phi_u_active_support_fraction", 0.0
+                        ),
                     }
                 )
             return state, info
@@ -2093,6 +2660,27 @@ def solve_monolithic_contact(
         **dof_layout,
         "history": history,
     }
+    if kphiu_reuse_enabled:
+        info.update(
+            {
+                "K_phi_u_reassembly_policy": last.get("K_phi_u_reassembly_policy", kphiu_reassembly_policy),
+                "K_phi_u_reassemble_count": last.get("K_phi_u_reassemble_count", 0),
+                "K_phi_u_reuse_hit_count": last.get("K_phi_u_reuse_hit_count", 0),
+                "K_phi_u_reuse_miss_count": last.get("K_phi_u_reuse_miss_count", 0),
+                "K_phi_u_reuse_hit_rate": last.get("K_phi_u_reuse_hit_rate", 0.0),
+                "K_phi_u_support_signature_change_count": last.get(
+                    "K_phi_u_support_signature_change_count", 0
+                ),
+                "K_phi_u_reuse_miss_no_cache": last.get("K_phi_u_reuse_miss_no_cache", 0),
+                "K_phi_u_reuse_miss_step_changed": last.get("K_phi_u_reuse_miss_step_changed", 0),
+                "K_phi_u_reuse_miss_signature_changed": last.get(
+                    "K_phi_u_reuse_miss_signature_changed", 0
+                ),
+                "K_phi_u_reuse_miss_cutback_or_restart": last.get(
+                    "K_phi_u_reuse_miss_cutback_or_restart", 0
+                ),
+            }
+        )
     return state, info
 
 
@@ -2134,10 +2722,12 @@ def solve_monolithic_contact_loadpath(
     phi_scatter_reuse=True,
     profile_phi_detail=True,
     phi_matrix_assembly_backend="python",
+    kphiu_reassembly_policy="always",
 ):
     """Advance a load path with the monolithic Newton step."""
     rank0 = state0["domain"].mpi_comm().rank == 0
     dof_layout = _state_dof_layout(state0)
+    kphiu_reuse_enabled = kphiu_reassembly_policy == "reuse_when_support_signature_unchanged"
     steps = []
     for idx, entry in enumerate(load_schedule, start=1):
         if isinstance(entry, dict):
@@ -2220,6 +2810,7 @@ def solve_monolithic_contact_loadpath(
             phi_scatter_reuse=phi_scatter_reuse,
             profile_phi_detail=profile_phi_detail,
             phi_matrix_assembly_backend=phi_matrix_assembly_backend,
+            kphiu_reassembly_policy=kphiu_reassembly_policy,
             verbose=verbose,
         )
 
@@ -2316,6 +2907,22 @@ def solve_monolithic_contact_loadpath(
             "phi_convert_time_K_phi_u": float(step_info.get("phi_convert_time_K_phi_u", 0.0)),
             "phi_extract_time_K_phi_phi": float(step_info.get("phi_extract_time_K_phi_phi", 0.0)),
             "phi_convert_time_K_phi_phi": float(step_info.get("phi_convert_time_K_phi_phi", 0.0)),
+            "K_phi_u_reassembly_policy": step_info.get("K_phi_u_reassembly_policy", kphiu_reassembly_policy),
+            "K_phi_u_reassemble_count": int(step_info.get("K_phi_u_reassemble_count", 0)),
+            "K_phi_u_reuse_hit_count": int(step_info.get("K_phi_u_reuse_hit_count", 0)),
+            "K_phi_u_reuse_miss_count": int(step_info.get("K_phi_u_reuse_miss_count", 0)),
+            "K_phi_u_reuse_hit_rate": float(step_info.get("K_phi_u_reuse_hit_rate", 0.0)),
+            "K_phi_u_support_signature_change_count": int(
+                step_info.get("K_phi_u_support_signature_change_count", 0)
+            ),
+            "K_phi_u_reuse_miss_no_cache": int(step_info.get("K_phi_u_reuse_miss_no_cache", 0)),
+            "K_phi_u_reuse_miss_step_changed": int(step_info.get("K_phi_u_reuse_miss_step_changed", 0)),
+            "K_phi_u_reuse_miss_signature_changed": int(
+                step_info.get("K_phi_u_reuse_miss_signature_changed", 0)
+            ),
+            "K_phi_u_reuse_miss_cutback_or_restart": int(
+                step_info.get("K_phi_u_reuse_miss_cutback_or_restart", 0)
+            ),
             "phi_form_call_count_R_phi": int(step_info.get("phi_form_call_count_R_phi", 0)),
             "phi_form_call_count_K_phi_u": int(step_info.get("phi_form_call_count_K_phi_u", 0)),
             "phi_form_call_count_K_phi_phi": int(step_info.get("phi_form_call_count_K_phi_phi", 0)),
@@ -2625,6 +3232,90 @@ def solve_monolithic_contact_loadpath(
                 float(item.get("phi_form_time_K_phi_u", 0.0))
                 for item in step_info.get("history", [])
             ],
+            "K_phi_u_pre_assemble_overhead_time_list": [
+                float(item.get("K_phi_u_pre_assemble_overhead_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_assemble_call_time_list": [
+                float(item.get("K_phi_u_assemble_call_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_post_assemble_immediate_time_list": [
+                float(item.get("K_phi_u_post_assemble_immediate_time", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_assembly_target_cell_count_list": [
+                int(item.get("K_phi_u_assembly_target_cell_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_assembly_target_facet_count_list": [
+                int(item.get("K_phi_u_assembly_target_facet_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_target_u_dof_count_list": [
+                int(item.get("K_phi_u_target_u_dof_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_target_phi_dof_count_list": [
+                int(item.get("K_phi_u_target_phi_dof_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_output_nnz_list": [
+                int(item.get("K_phi_u_output_nnz", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_output_density_list": [
+                float(item.get("K_phi_u_output_density", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_row_count_list": [
+                int(item.get("K_phi_u_active_row_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_col_count_list": [
+                int(item.get("K_phi_u_active_col_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_row_fraction_list": [
+                float(item.get("K_phi_u_active_row_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_col_fraction_list": [
+                float(item.get("K_phi_u_active_col_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_candidate_point_count_list": [
+                int(item.get("contact_candidate_point_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_active_point_count_list": [
+                int(item.get("contact_active_point_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "contact_active_fraction_list": [
+                float(item.get("contact_active_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_rows_touched_by_active_contact_list": [
+                int(item.get("K_phi_u_rows_touched_by_active_contact", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_cols_touched_by_active_contact_list": [
+                int(item.get("K_phi_u_cols_touched_by_active_contact", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_support_row_fraction_list": [
+                float(item.get("K_phi_u_active_support_row_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_support_col_fraction_list": [
+                float(item.get("K_phi_u_active_support_col_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_active_support_fraction_list": [
+                float(item.get("K_phi_u_active_support_fraction", 0.0))
+                for item in step_info.get("history", [])
+            ],
             "phi_form_time_K_phi_phi_list": [
                 float(item.get("phi_form_time_K_phi_phi", 0.0))
                 for item in step_info.get("history", [])
@@ -2643,6 +3334,36 @@ def solve_monolithic_contact_loadpath(
             ],
             "phi_convert_time_K_phi_phi_list": [
                 float(item.get("phi_convert_time_K_phi_phi", 0.0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reassemble_count_list": [
+                int(item.get("K_phi_u_reassemble_count", 0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_hit_count_list": [
+                int(item.get("K_phi_u_reuse_hit_count", 0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_miss_count_list": [
+                int(item.get("K_phi_u_reuse_miss_count", 0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_hit_rate_list": [
+                float(item.get("K_phi_u_reuse_hit_rate", 0.0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_support_signature_change_count_list": [
+                int(item.get("K_phi_u_support_signature_change_count", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_miss_no_cache_list": [
+                int(item.get("K_phi_u_reuse_miss_no_cache", 0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_miss_step_changed_list": [
+                int(item.get("K_phi_u_reuse_miss_step_changed", 0)) for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_miss_signature_changed_list": [
+                int(item.get("K_phi_u_reuse_miss_signature_changed", 0))
+                for item in step_info.get("history", [])
+            ],
+            "K_phi_u_reuse_miss_cutback_or_restart_list": [
+                int(item.get("K_phi_u_reuse_miss_cutback_or_restart", 0))
                 for item in step_info.get("history", [])
             ],
             "phi_form_call_count_R_phi_list": [

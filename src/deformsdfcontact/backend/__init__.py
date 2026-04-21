@@ -1,0 +1,2 @@
+"""Backend-specific transition adapters."""
+

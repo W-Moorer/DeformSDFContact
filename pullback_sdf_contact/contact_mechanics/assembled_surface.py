@@ -187,7 +187,13 @@ def evaluate_surface_contact_points(
     return point_data, profile
 
 
-def collect_contact_diagnostics_surface(quadrature_points, point_data, residual=None):
+def collect_contact_diagnostics_surface(
+    quadrature_points,
+    point_data,
+    residual=None,
+    *,
+    profile_assembly_detail=False,
+):
     """Collect aggregated diagnostics for the current slave surface evaluation."""
     active_points = [data for data in point_data if data["g_n"] < 0.0]
     negative_gap_sum = float(
@@ -199,6 +205,7 @@ def collect_contact_diagnostics_surface(quadrature_points, point_data, residual=
     num_slave_facets = len({qp.facet_id for qp in quadrature_points})
     diagnostics = {
         "active_contact_points": len(active_points),
+        "contact_candidate_point_count": len(point_data),
         "negative_gap_sum": negative_gap_sum,
         "reference_slave_area": reference_slave_area,
         "num_slave_facets": num_slave_facets,
@@ -209,6 +216,23 @@ def collect_contact_diagnostics_surface(quadrature_points, point_data, residual=
         ),
         "reaction_norm": float(np.linalg.norm(residual)) if residual is not None else 0.0,
     }
+    diagnostics["contact_active_fraction"] = (
+        0.0
+        if diagnostics["contact_candidate_point_count"] == 0
+        else float(diagnostics["active_contact_points"]) / float(diagnostics["contact_candidate_point_count"])
+    )
+    if profile_assembly_detail:
+        active_u_dofs = set()
+        active_phi_dofs = set()
+        for data in active_points:
+            u_dofs = data.get("u_dofs")
+            phi_dofs = data.get("phi_dofs")
+            if u_dofs is not None:
+                active_u_dofs.update(int(v) for v in np.asarray(u_dofs, dtype=np.int64).ravel())
+            if phi_dofs is not None:
+                active_phi_dofs.update(int(v) for v in np.asarray(phi_dofs, dtype=np.int64).ravel())
+        diagnostics["K_phi_u_rows_touched_by_active_contact"] = int(len(active_phi_dofs))
+        diagnostics["K_phi_u_cols_touched_by_active_contact"] = int(len(active_u_dofs))
     return diagnostics
 
 
@@ -328,7 +352,12 @@ def assemble_contact_contributions_surface(
 
     diagnostics = None
     if need_diagnostics:
-        diagnostics = collect_contact_diagnostics_surface(quadrature_points, point_data, residual)
+        diagnostics = collect_contact_diagnostics_surface(
+            quadrature_points,
+            point_data,
+            residual,
+            profile_assembly_detail=profile_assembly_detail,
+        )
 
     return {
         "R_u_c": residual,

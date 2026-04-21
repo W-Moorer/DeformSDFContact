@@ -1257,6 +1257,81 @@ aggressive & Krylov & 0.12 & 21 & 21 & 0.12471645522372302 & 0.12127179622886528
 
 因此，当前阶段可以用一句话概括：\textbf{本项目已经从局部公式验证走到冻结的系统级基线，并且将 monolithic 路线从 dense 推进到了 PETSc 与 Krylov 层面。} 对于近期组会汇报而言，这已经足以证明该路线不仅在理论上闭合，而且在数值实现与工程推进上已经进入可持续扩展的阶段。
 
+\subsection{当前工程主线、研究线封箱与 canonical baseline}
+
+截至当前版本，项目的工程结论已经进一步收口，不再是“所有路线同时并行探索”的状态，而是形成了清晰的主线/研究线分工。
+
+\begin{enumerate}[label=\arabic*)]
+    \item 当前默认工程主线固定为 \textbf{GMRES + ILU}，并以
+    \[
+    \texttt{phi\_cache\_prime=True},\quad
+    \texttt{phi\_scatter\_reuse=True},\quad
+    \texttt{phi\_profile\_mode=light},\quad
+    \texttt{phi\_matrix\_assembly\_backend=python}
+    \]
+    作为唯一合法的工作路径；
+    \item safe \texttt{fieldsplit\_schur\_lower\_selfp\_ilu} 目前仍保留为研究线，而不是默认主线；现有结果表明该路径尚未形成稳定的正面线性收益，主要仍受制于 \texttt{ksp\_setup\_time}；
+    \item $K_{\phi u}$ 条件复用/重装配频率控制路线已经完成 portrait、prototype v1/v2/v3 与封箱总结。其机制性结论是正面的：在 $4\times4\times4$ repeated-Newton 路径上，确实观测到真实 reuse hit，且 active-contact 支持、active rows/cols 以及输出 nnz 在步间稳定；但其工程化落地始终未能在默认路径和无复用空间场景下保持足够轻量，因此当前只保留为研究线，不进入默认工程实现。
+\end{enumerate}
+
+表~\ref{tab:current-clean-baseline-light} 汇总了当前 clean-state 默认工程路径下的 canonical light baseline。需要强调的是，这组结果不是历史最佳 strict baseline，而是\emph{在研究线彻底隔离出默认路径之后}重新建立的主线比较基准；后续默认工程优化应以这组数值为直接对照对象。
+
+\begin{table}[H]
+\centering
+\caption{当前默认工程主线的 canonical clean baseline（light）}
+\label{tab:current-clean-baseline-light}
+\small
+\begin{tabular}{lccccc}
+\toprule
+算例 & 线性求解 & $\phi$ block assembly time & Newton step walltime & linear iters & ksp reason \\
+\midrule
+$4\times4\times4$ baseline & GMRES + ILU & 1.1995029700 & 2.3604800730 & 6 & 3 \\
+$5\times5\times5$ single-Newton & GMRES + ILU & 0.3172711130 & 1.0345028650 & 1 & 3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+与 light 路径相对应，表~\ref{tab:current-clean-baseline-full} 给出了当前 clean-state 下的 full-audit 参考点。它回答的不是“最终谁更快”，而是“当前主线最贵的对象到底是谁”。从两组算例可以一致看到，当前最贵的三个 $\phi$ 子项仍然稳定排序为
+\[
+K_{\phi u}\text{ form} \;>\; K_{\phi\phi}\text{ form} \;>\; K_{\phi\phi}\text{ convert},
+\]
+其中 $K_{\phi u}$ form 依然是默认主线的第一主刀口。
+
+\begin{table}[H]
+\centering
+\caption{当前默认工程主线的 canonical clean baseline（full audit）}
+\label{tab:current-clean-baseline-full}
+\small
+\begin{tabular}{lccccccc}
+\toprule
+算例 & $R_\phi$ form & $K_{\phi u}$ form & $K_{\phi\phi}$ form & $K_{\phi u}$ extract & $K_{\phi u}$ convert & $K_{\phi\phi}$ extract & $K_{\phi\phi}$ convert \\
+\midrule
+$4\times4\times4$ baseline & 0.0579642740 & 0.8626711030 & 0.2657241460 & 0.0001753390 & 0.0017335610 & 0.0011359570 & 0.0040238730 \\
+$5\times5\times5$ single-Newton & 0.0149922830 & 0.2144969570 & 0.0624936690 & 0.0001180200 & 0.0051474580 & 0.0005938370 & 0.0110268580 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+更进一步，当前 clean baseline 与历史最佳 strict baseline 的对比还给出了一个清晰的主线恢复目标。在 $4\times4\times4$ repeated-Newton 路径上，当前默认主线相对历史最佳的回退主要集中在 solver 内部的 $\phi$ form 组装层，其中回退来源排序为
+\[
+K_{\phi u}\text{ form} \;>\; K_{\phi\phi}\text{ form} \;>\; R_\phi\text{ form},
+\]
+而 extract/convert 不是当前主因。定量上，当前 clean baseline 相对历史最佳 strict baseline 的回退约为
+\[
+\Delta(K_{\phi u}\text{ form}) \approx +0.0744,\qquad
+\Delta(K_{\phi\phi}\text{ form}) \approx +0.0373,\qquad
+\Delta(R_\phi\text{ form}) \approx +0.0041.
+\]
+这意味着：在研究线封箱之后，默认工程主线下一步最应优先恢复的仍然是 $4\times4\times4$ repeated-Newton 下的 $K_{\phi u}$ form 本体开销，而不是重新回到 backend、Schur 或条件复用路线。
+
+最后，需要把条件复用研究线的结论在论文中表述清楚。现有 portrait 说明：当前 $J_{\phi u}$ 的非零支持已经与活跃接触支持集一致，$K_{\phi u}$ 的主要时间几乎全部消耗在 assemble call 本体而不是 pre/post 包装层；在 $4\times4\times4$ repeated-Newton 路径中，support signature、active rows/cols 与 nnz 在六个 Newton 子步间保持稳定，因此从机制上支持“减少重复重装配”的想法。prototype v1--v3 也确实观测到
+\[
+\text{reassemble count}: 6 \rightarrow 2,\qquad
+\text{reuse hit count}=4,\qquad
+\text{reuse hit rate}=66.7\%.
+\]
+但是，这条路线始终未能同时满足两个工程约束：其一，默认 \texttt{always} 路径必须完全不被污染；其二，像 $5\times5\times5$ single-Newton 这样无复用空间的场景必须付出接近零的额外代价。由于这两个条件始终未能同时达标，本文将该路线明确归类为\textbf{研究性正结果 + 工程性负结果}：它证明了机制值得进一步研究，但当前不作为默认工程路径采纳。
+
 \section{讨论}\label{sec:discussion}
 
 本文建立的理论框架具有以下特点。
@@ -1271,7 +1346,11 @@ aggressive & Krylov & 0.12 & 21 & 21 & 0.12471645522372302 & 0.12127179622886528
 
 在此基础上，本文系统推导了 pull-back SDF 子问题关于距离场自由度与结构位移自由度的一致切线，建立了结构位移场与 SDF 场的整体一致线性化，并在罚函数法与增广拉格朗日法下推导了接触残量的严格几何切线。最终，得到一个由结构残量与 SDF 残量共同组成的 monolithic Newton 闭合系统，以及相应的 Schur 补等效一致切线。
 
-本文所建立的理论与算法框架为有限形变下高保真时变 SDF 的构造及其与接触力学的统一耦合提供了一条更具几何一致性与数值一致性的路线。后续工作可围绕更高阶离散、摩擦接触、自接触、多界面耦合以及可微求解等方向进一步展开。
+从当前阶段性数值结果看，项目已经形成了稳定的工程主线与清晰的研究线边界。默认工程路径以 GMRES + ILU 为当前最稳实用途径；在这一主线上，当前 canonical clean baseline 已经建立，并给出了后续所有默认工程优化的唯一合法比较基准。与此同时，full-audit 结果稳定表明：当前 $\phi$ 子问题中最昂贵的三个对象依次为 $K_{\phi u}$ form、$K_{\phi\phi}$ form 与 $K_{\phi\phi}$ convert，其中 $K_{\phi u}$ form 仍是第一主刀口。
+
+更重要的是，本文不仅给出了正面结果，也给出了清晰的负结果边界。对于 $K_{\phi u}$ 条件复用/重装配频率控制路线，本文已经通过 workload portrait 与 prototype v1--v3 证明：在 repeated-Newton 场景中，减少重复重装配在机制上是可行的；然而，该路线在当前实现下始终未能同时满足“默认路径零污染”和“无复用空间场景近零额外代价”这两个工程约束。因此，这一方向当前应作为研究线保留，而不宜进入默认工程路径。相应地，默认工程主线的下一步工作不应继续卷新的 reuse prototype，而应回到 canonical clean baseline 上，优先恢复 $4\times4\times4$ repeated-Newton 下 $K_{\phi u}$ form 相对历史最佳 strict baseline 的回退。
+
+本文所建立的理论与算法框架为有限形变下高保真时变 SDF 的构造及其与接触力学的统一耦合提供了一条更具几何一致性与数值一致性的路线；而当前阶段的工程结论则进一步明确了主线与研究线的边界。后续工作可围绕默认工程主线上的 $\phi$ form 性能恢复、更成熟的 Schur / block triangular 预条件器、更高阶离散、摩擦接触、自接触、多界面耦合以及可微求解等方向进一步展开。
 
 \section*{说明}
 

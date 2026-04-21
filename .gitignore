@@ -28,9 +28,28 @@ Thumbs.db
 .env
 .venv/
 venv/
+.pytest_cache/
 
-# Latex
+# LaTeX generated files
 *.aux
 *.log
 *.out
 *.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+*.idx
+*.ind
+*.ilg
+*.glo
+*.gls
+*.lot
+*.lof
+*.nav
+*.snm
+*.vrb
+*.xdv
+*.run.xml
+*.bcf

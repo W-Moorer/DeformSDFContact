@@ -30,6 +30,7 @@ def summarize_monolithic_result(
     phi_scatter_reuse,
     phi_profile_mode,
     phi_matrix_assembly_backend,
+    kphiu_reassembly_policy,
 ):
     accepted_history = result["accepted_history"]
     final_accepted = accepted_history[-1] if accepted_history else None
@@ -188,6 +189,7 @@ def run_monolithic_case(
     phi_scatter_reuse=None,
     phi_profile_mode=None,
     phi_matrix_assembly_backend=None,
+    kphiu_reassembly_policy=None,
     write_outputs=True,
     verbose=False,
 ):
@@ -230,6 +232,11 @@ def run_monolithic_case(
         if phi_matrix_assembly_backend is None
         else str(phi_matrix_assembly_backend)
     )
+    kphiu_reassembly_policy = (
+        recommended["kphiu_reassembly_policy"]
+        if kphiu_reassembly_policy is None
+        else str(kphiu_reassembly_policy)
+    )
     max_backtracks = recommended["max_backtracks"] if max_backtracks is None else int(max_backtracks)
     backtrack_factor = (
         recommended["backtrack_factor"] if backtrack_factor is None else float(backtrack_factor)
@@ -241,6 +248,8 @@ def run_monolithic_case(
         f"_scatter{int(bool(phi_scatter_reuse))}"
         f"_phiProf{phi_profile_mode}"
     )
+    if str(kphiu_reassembly_policy) != "always":
+        history_suffix += f"_kphiuReuse{kphiu_reassembly_policy}"
     history_path = (
         f"monolithic_history_{mode}_{mesh_resolution}_{backend}_{linear_solver_mode}{history_suffix}.csv"
     )
@@ -281,6 +290,7 @@ def run_monolithic_case(
         phi_scatter_reuse=phi_scatter_reuse,
         profile_phi_detail=(phi_profile_mode == "full"),
         phi_matrix_assembly_backend=phi_matrix_assembly_backend,
+        kphiu_reassembly_policy=kphiu_reassembly_policy,
     )
     summary = summarize_monolithic_result(
         result,
@@ -298,7 +308,10 @@ def run_monolithic_case(
         phi_scatter_reuse,
         phi_profile_mode,
         phi_matrix_assembly_backend,
+        kphiu_reassembly_policy,
     )
+    if str(kphiu_reassembly_policy) != "always":
+        summary["kphiu_reassembly_policy"] = str(kphiu_reassembly_policy)
 
     phi_delta = final_state["phi"].vector.array_r - final_state["phi0"].vector.array_r
     summary["u_norm"] = float(np.linalg.norm(final_state["u"].vector.array_r))
@@ -415,6 +428,11 @@ def main():
         choices=["python", "cpp_petsc"],
         default=None,
     )
+    parser.add_argument(
+        "--kphiu-reassembly-policy",
+        choices=["always", "reuse_when_support_signature_unchanged"],
+        default=None,
+    )
     args = parser.parse_args()
 
     modes = ["baseline", "aggressive"] if args.mode == "all" else [args.mode]
@@ -468,6 +486,8 @@ def main():
     print(f"phi_scatter_reuse = {resolved_phi_scatter_reuse}")
     print(f"phi_profile_mode = {args.phi_profile_mode}")
     print(f"phi_matrix_assembly_backend = {args.phi_matrix_assembly_backend}")
+    if args.kphiu_reassembly_policy not in (None, "always"):
+        print(f"kphiu_reassembly_policy = {args.kphiu_reassembly_policy}")
     print(f"line_search = {resolved_line_search}")
     print(f"damping = {resolved_damping}")
     print("")
@@ -497,6 +517,7 @@ def main():
             phi_scatter_reuse=resolved_phi_scatter_reuse,
             phi_profile_mode=args.phi_profile_mode,
             phi_matrix_assembly_backend=args.phi_matrix_assembly_backend,
+            kphiu_reassembly_policy=args.kphiu_reassembly_policy,
             write_outputs=True,
             verbose=False,
         )
